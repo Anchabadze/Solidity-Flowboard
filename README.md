@@ -18,7 +18,33 @@ Each card also tells you, at a glance, what the function *does to the system* �
 
 ## Installation
 
-Open the Extensions view (`Ctrl+Shift+X` / `Cmd+Shift+X`), search for **Solidity Flowboard**, and click **Install**. Then complete the setup below.
+Solidity Flowboard is published on the [Open VSX Registry](https://open-vsx.org/extension/anchabadze/solidity-flowboard). How you install it depends on your editor.
+
+### Cursor, VSCodium, Windsurf, Gitpod (and other Open VSX–based editors)
+
+These editors use Open VSX as their marketplace, so you can install normally:
+
+1. Open the Extensions view (`Ctrl+Shift+X` / `Cmd+Shift+X`).
+2. Search for **Solidity Flowboard**.
+3. Click **Install**. Updates arrive automatically.
+
+### Visual Studio Code
+
+Official VS Code only searches the Microsoft Marketplace, so install from the `.vsix` file instead (the extension itself runs exactly the same):
+
+1. Open the extension's Open VSX page: **https://open-vsx.org/extension/anchabadze/solidity-flowboard**
+2. Click **Download** to get the `.vsix` file.
+3. In VS Code: Extensions view → the **`...`** menu (Views and More Actions) → **Install from VSIX…** → pick the downloaded file.
+
+Or from the command line (use the file you downloaded):
+
+```bash
+code --install-extension /path/to/anchabadze.solidity-flowboard-<version>.vsix
+```
+
+> Updates aren't automatic with the VSIX method — re-download the latest `.vsix` from the Open VSX page to update.
+
+After installing, complete the setup below.
 
 ---
 

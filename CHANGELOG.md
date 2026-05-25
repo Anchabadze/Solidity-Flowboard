@@ -1,5 +1,9 @@
 # Change Log
 
+## 1.0.1
+
+- Documentation: installation instructions for Open VSX — search-and-install in Cursor/VSCodium/Windsurf/Gitpod, and VSIX download for Visual Studio Code.
+
 ## 1.0.0
 
 Initial release.
