@@ -1,5 +1,10 @@
 # Change Log
 
+## 1.0.3
+
+- Each call occurrence opens its own card: when a function is called multiple times in one body (e.g. two `_transferFrom(...)` calls), clicking each opens a separate window instead of toggling the same one.
+- Direct library/contract calls by name (e.g. `Math.mulDivRoundingUp(...)`, `SafeERC20.safeTransfer(...)`) are now highlighted and navigable, not just `variable.method()` calls.
+
 ## 1.0.2
 
 - Overloaded functions resolve correctly: a call now opens the overload whose argument count matches (e.g. `f(a)` vs `f(a, b, c)`), instead of always opening the first definition.

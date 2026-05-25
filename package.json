@@ -2,7 +2,7 @@
   "name": "solidity-flowboard",
   "displayName": "Solidity Flowboard",
   "description": "Trace Solidity function call flows card-by-card on a draggable canvas. Built for smart-contract auditors.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "anchabadze",
   "license": "MIT",
   "repository": {
@@ -93,7 +93,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "install-local": "npm run compile && rm -rf \"$HOME/.vscode-server/extensions/\"*.solidity-flowboard-* && mkdir -p \"$HOME/.vscode-server/extensions/anchabadze.solidity-flowboard-1.0.2\" && cp -r out webview media package.json package.nls.json package.nls.ru.json README.md \"$HOME/.vscode-server/extensions/anchabadze.solidity-flowboard-1.0.2/\""
+    "install-local": "npm run compile && rm -rf \"$HOME/.vscode-server/extensions/\"*.solidity-flowboard-* && mkdir -p \"$HOME/.vscode-server/extensions/anchabadze.solidity-flowboard-1.0.3\" && cp -r out webview media package.json package.nls.json package.nls.ru.json README.md \"$HOME/.vscode-server/extensions/anchabadze.solidity-flowboard-1.0.3/\""
   },
   "devDependencies": {
     "@types/node": "^18.19.0",

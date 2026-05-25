@@ -942,6 +942,11 @@ function resolvableInType(result: SlitherResult, type: string, method: string): 
   return !!searchBases(result.functionsByContract, result.contractBases, type, method);
 }
 
+/** True if `name` is an in-project contract/library/interface (a usable type). */
+function isProjectType(result: SlitherResult, name: string): boolean {
+  return result.functionsByContract.has(name) || result.contractBases.has(name);
+}
+
 /** Find the declared type of variable `recv` visible in `contract` (+ bases). */
 function lookupReceiverType(
   result: SlitherResult,
@@ -998,8 +1003,13 @@ export function classifyCallSites(
         callArity[s.name] = s.argCount;
       }
     } else if (s.recv) {
-      // Member call on a variable.
-      const type = contract ? lookupReceiverType(result, contract, s.recv) : undefined;
+      // Member call `recv.method()`. `recv` is either a variable (use its
+      // declared type) or a library/contract name called directly, e.g.
+      // `Math.mulDivRoundingUp(...)` or `SafeERC20.safeTransfer(...)`.
+      let type = contract ? lookupReceiverType(result, contract, s.recv) : undefined;
+      if (!type && isProjectType(result, s.recv)) {
+        type = s.recv;
+      }
       if (type && resolvableInType(result, type, s.name)) {
         const key = s.recv + ' ' + s.name;
         if (!seen.has(key)) {

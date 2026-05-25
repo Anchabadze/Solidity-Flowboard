@@ -33,6 +33,8 @@ const NOTE_MIN_H = 48;
 const cards = new Map();
 /** { from, to } pairs (parent id -> child id) drawn as connecting lines */
 const edges = [];
+/** childId -> parent call-site index, set when expanding so the new card can record it */
+const pendingChildSite = new Map();
 /** id -> { el, id, x, y, fontSize, color, textEl } */
 const notes = new Map();
 /** Models (card or note) currently selected in 'select' mode. */
@@ -308,8 +310,12 @@ function highlightSolidity(code, model) {
 
         if (clickable) {
           const arity = model.callArity ? model.callArity[ident] : undefined;
+          // Unique per-occurrence id (document order within this card), so two
+          // calls to the same function each get their own card.
+          const site = model._site != null ? model._site : 0;
+          model._site = site + 1;
           out +=
-            '<span class="call" data-call="' + esc(ident) + '"' +
+            '<span class="call" data-call="' + esc(ident) + '" data-site="' + site + '"' +
             (isSuper ? ' data-super="1"' : '') +
             (contract ? ' data-contract="' + esc(contract) + '"' : '') +
             (arity != null ? ' data-arity="' + arity + '"' : '') +
@@ -326,14 +332,27 @@ function highlightSolidity(code, model) {
 }
 
 // Cards: expand / toggle ---------------------------------------------------
-/** Find the child card of `fromId` that holds function `name`, if open. */
-function findChildCard(fromId, name) {
+/**
+ * Find the open child card of `fromId` for a given call SITE (occurrence). Each
+ * distinct call occurrence has its own card, so two calls to the same function
+ * in one body open two cards. Falls back to matching by name only when no site
+ * id is available (older/restored cards).
+ */
+function findChildCard(fromId, site, name) {
   for (const e of edges) {
-    if (e.from === fromId) {
-      const c = cards.get(e.to);
-      if (c && c.name === name) {
+    if (e.from !== fromId) {
+      continue;
+    }
+    const c = cards.get(e.to);
+    if (!c) {
+      continue;
+    }
+    if (site != null) {
+      if (c.parentSite === site) {
         return c;
       }
+    } else if (c.name === name) {
+      return c;
     }
   }
   return null;
@@ -341,12 +360,13 @@ function findChildCard(fromId, name) {
 
 /**
  * Click on a call inside card `fromId`:
- *  - if that call's card is already open as a child of THIS card, remove it
- *    (and its subtree) - other cards that call the same function stay open;
+ *  - if THAT call occurrence's card is already open as a child, remove it
+ *    (and its subtree) - other occurrences / functions stay open;
  *  - otherwise open a new card for it, linked to this card.
  */
 function activateCall(targetName, fromId, opts) {
-  const existing = findChildCard(fromId, targetName);
+  const site = opts && opts.site != null ? opts.site : undefined;
+  const existing = findChildCard(fromId, site, targetName);
   if (existing) {
     removeSubtree(existing.id);
     schedulePersist();
@@ -356,6 +376,11 @@ function activateCall(targetName, fromId, opts) {
   // or the card's own contract for internal/super calls.
   const fromContract = (opts && opts.contract) || null;
   const childId = genCardId();
+  // Remember which call site opened this child, so re-clicking the SAME site
+  // toggles it while a different occurrence opens its own card.
+  if (site != null) {
+    pendingChildSite.set(childId, site);
+  }
   vscode.postMessage({
     type: 'expand',
     functionName: targetName,
@@ -641,6 +666,7 @@ function renderCodeBody(model) {
 
   const lines = model.clean.split('\n');
   let html = '';
+  model._site = 0; // reset per-render so call-site ids are assigned in document order
   lines.forEach((line, i) => {
     const num = i + 1;
     const lineHtml = highlightSolidity(line, model);
@@ -657,7 +683,8 @@ function renderCodeBody(model) {
       activateCall(el.dataset.call, model.id, {
         isSuper: el.dataset.super === '1',
         contract: el.dataset.contract || null,
-        argCount: el.dataset.arity != null ? Number(el.dataset.arity) : undefined
+        argCount: el.dataset.arity != null ? Number(el.dataset.arity) : undefined,
+        site: el.dataset.site != null ? Number(el.dataset.site) : undefined
       });
     });
   });
@@ -669,6 +696,15 @@ function addCard(data, opts) {
 
   const id = data.id || genCardId();
   const parentId = data.parentId || null;
+  // Which call site in the parent opened this card (for per-occurrence toggle).
+  // Fresh cards read it from pendingChildSite; restored cards from saved data.
+  const parentSite =
+    data.parentSite != null
+      ? data.parentSite
+      : pendingChildSite.has(id)
+        ? pendingChildSite.get(id)
+        : null;
+  pendingChildSite.delete(id);
 
   const pos = placeCard(data);
 
@@ -774,6 +810,7 @@ function addCard(data, opts) {
     x: pos.x,
     y: pos.y,
     childCount: 0,
+    parentSite: parentSite,
     codeEl: codeEl,
     summaryEl: summaryEl,
     annotateBtn: annotateBtn,
@@ -788,6 +825,7 @@ function addCard(data, opts) {
       type: 'addCard',
       id: id,
       parentId: parentId,
+      parentSite: parentSite,
       name: data.name,
       code: data.code,
       calls: data.calls || [],
