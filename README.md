@@ -66,7 +66,7 @@ Navigation into a called function only works if that function's **source is phys
 
 - **Foundry** — run `forge install` so `lib/` contains the sources (e.g. OpenZeppelin under `lib/openzeppelin-contracts/`).
 - **Soldeer** (a Solidity package manager) — its `dependencies/` folder is scanned the same way.
-- **Hardhat / npm** — ⚠️ `node_modules` is intentionally skipped (it bloats the index and is rarely the audit target). Calls into npm‑only dependencies won't resolve to a card; vendor the sources into the tree if you need to follow them.
+- **Hardhat / npm / pnpm** — `node_modules` isn't scanned wholesale, but dependency directories your **remappings** point to (`remappings.txt` or `foundry.toml`) are indexed even when they resolve into `node_modules` (e.g. `@openzeppelin/contracts-upgradeable/` → `node_modules/...`, including pnpm symlinks). Imports with no remapping into `node_modules` won't resolve to a card.
 
 Other build/output directories are skipped as well: `.git`, `out`, `artifacts`, `cache`, `coverage`, `typechain`, `typechain-types`.
 

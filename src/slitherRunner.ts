@@ -42,6 +42,10 @@ export interface FunctionInfo {
   calls: string[];
   /** Member calls `recv.method()` whose receiver type is an in-project contract. */
   memberCalls?: MemberCall[];
+  /** Number of declared parameters (used to resolve overloads by arity). */
+  paramCount?: number;
+  /** Call name -> argument count at its call site, so the UI can pick the right overload. */
+  callArity?: Record<string, number>;
   /** Modifier names from the signature (raw). */
   modifierNames?: string[];
   /** Modifiers resolved to their definition locations. */
@@ -57,6 +61,8 @@ export interface SlitherResult {
   functions: Map<string, FunctionInfo>;
   /** contractName -> (functionName -> info), only for definitions WITH a body. */
   functionsByContract: Map<string, Map<string, FunctionInfo>>;
+  /** contractName -> (functionName -> ALL body-definition overloads), for arity-aware resolution. */
+  overloadsByContract: Map<string, Map<string, FunctionInfo[]>>;
   /** contractName -> ordered list of its direct base contracts (the `is ...` list). */
   contractBases: Map<string, string[]>;
   /** contractName -> (varName -> typeName) for state vars / params / locals. */
@@ -118,6 +124,106 @@ function walkSolFiles(root: string): string[] {
     }
   }
   return results;
+}
+
+/**
+ * Read Foundry/Hardhat-style remappings (`remappings.txt` + `foundry.toml`) and
+ * return the absolute target directories they point to, restricted to inside the
+ * project. This is how dependency sources living under `node_modules` (e.g.
+ * `@openzeppelin/contracts-upgradeable/` mapped into node_modules) get indexed
+ * without scanning all of node_modules.
+ */
+function readRemappingDirs(projectPath: string): string[] {
+  const lines: string[] = [];
+  try {
+    lines.push(...fs.readFileSync(path.join(projectPath, 'remappings.txt'), 'utf8').split(/\r?\n/));
+  } catch {
+    /* no remappings.txt */
+  }
+  try {
+    const toml = fs.readFileSync(path.join(projectPath, 'foundry.toml'), 'utf8');
+    const block = /remappings\s*=\s*\[([\s\S]*?)\]/.exec(toml);
+    if (block) {
+      for (const q of block[1].match(/["']([^"']+)["']/g) || []) {
+        lines.push(q.replace(/["']/g, ''));
+      }
+    }
+  } catch {
+    /* no foundry.toml */
+  }
+
+  const root = path.resolve(projectPath);
+  const dirs = new Set<string>();
+  for (const line of lines) {
+    const eq = line.indexOf('=');
+    if (eq === -1) {
+      continue;
+    }
+    const target = line.slice(eq + 1).trim();
+    if (!target) {
+      continue;
+    }
+    const abs = path.resolve(projectPath, target);
+    // Only inside the project; the normal walk already covers lib/ etc., so
+    // dedup-by-realpath in runSlither prevents double indexing.
+    if (abs === root || abs.startsWith(root + path.sep)) {
+      dirs.add(abs);
+    }
+  }
+  return [...dirs];
+}
+
+/**
+ * Walk a remapped dependency directory, FOLLOWING symlinks (pnpm/node_modules
+ * use them) and skipping nested `node_modules` to bound transitive deps. `add`
+ * dedups by real path; `visited` guards against symlink cycles.
+ */
+function walkRemappedDir(
+  dir: string,
+  add: (file: string) => void,
+  visited: Set<string>,
+  budget: { left: number }
+): void {
+  if (budget.left <= 0) {
+    return;
+  }
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return;
+  }
+  if (visited.has(real)) {
+    return;
+  }
+  visited.add(real);
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+      continue;
+    }
+    const full = path.join(dir, entry.name);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(full); // follows symlinks
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      walkRemappedDir(full, add, visited, budget);
+    } else if (st.isFile() && entry.name.endsWith('.sol')) {
+      if (budget.left <= 0) {
+        return;
+      }
+      budget.left--;
+      add(full);
+    }
+  }
 }
 
 /** Convert a character index into a 1-based line number. */
@@ -241,9 +347,38 @@ interface CallSite {
   name: string;
   /** null = internal call; 'super'/'this'; '' = member with non-identifier receiver (cast/chain); else the receiver identifier. */
   recv: string | null;
+  /** Number of top-level arguments passed at this call site (for overload resolution). */
+  argCount: number;
 }
 
-/** Extract every call occurrence from a function body with its receiver. */
+/**
+ * Count top-level, comma-separated items in a parenthesized region (arguments
+ * of a call or parameters of a declaration). Respects nested ()[]{} and strings.
+ * Empty/whitespace → 0.
+ */
+function countArgs(text: string): number {
+  let depth = 0;
+  let inStr = false;
+  let strCh = '';
+  let sawContent = false;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (c === '\\') { i++; continue; }
+      if (c === strCh) { inStr = false; }
+      continue;
+    }
+    if (c === '"' || c === "'") { inStr = true; strCh = c; sawContent = true; continue; }
+    if (c === '(' || c === '[' || c === '{') { depth++; sawContent = true; continue; }
+    if (c === ')' || c === ']' || c === '}') { if (depth > 0) { depth--; } sawContent = true; continue; }
+    if (c === ',' && depth === 0) { count++; continue; }
+    if (!/\s/.test(c)) { sawContent = true; }
+  }
+  return sawContent ? count + 1 : 0;
+}
+
+/** Extract every call occurrence from a function body with its receiver and arity. */
 function extractCallSites(body: string): CallSite[] {
   const sites: CallSite[] = [];
   const re = /([A-Za-z_$][\w$]*)\s*\(/g;
@@ -253,6 +388,11 @@ function extractCallSites(body: string): CallSite[] {
     if (NON_CALL_WORDS.has(name)) {
       continue;
     }
+    // Argument count: scan from this call's '(' to its matching ')'.
+    const parenIdx = re.lastIndex - 1; // index of '('
+    const parenClose = findMatching(body, parenIdx, '(', ')');
+    const argCount = parenClose === -1 ? 0 : countArgs(body.slice(parenIdx + 1, parenClose));
+
     let i = m.index - 1;
     while (i >= 0 && /\s/.test(body[i])) {
       i--;
@@ -269,7 +409,7 @@ function extractCallSites(body: string): CallSite[] {
       }
       recv = body.slice(i + 1, end); // identifier, or '' for a cast/chain receiver
     }
-    sites.push({ name, recv });
+    sites.push({ name, recv, argCount });
   }
   return sites;
 }
@@ -410,6 +550,7 @@ function indexSolFile(
   functions: Map<string, FunctionInfo>,
   hasBody: Map<string, boolean>,
   functionsByContract: Map<string, Map<string, FunctionInfo>>,
+  overloadsByContract: Map<string, Map<string, FunctionInfo[]>>,
   contractBases: Map<string, string[]>,
   varTypesByContract: Map<string, Map<string, string>>,
   modifiersByContract: Map<string, Map<string, ModifierDef>>,
@@ -533,6 +674,7 @@ function indexSolFile(
       startLine,
       endLine,
       calls: [],
+      paramCount: countArgs(content.slice(paramOpen + 1, paramClose)),
       contract
     };
     if (modifierNames.length) {
@@ -546,7 +688,9 @@ function indexSolFile(
       hasBody.set(name, true);
     }
 
-    // Per-contract index (implementations only; first wins for overloads).
+    // Per-contract index. functionsByContract keeps the first def (name-only
+    // resolution / existence checks); overloadsByContract keeps ALL of them so
+    // a call can be resolved to the overload whose arity matches.
     if (contract) {
       let cm = functionsByContract.get(contract);
       if (!cm) {
@@ -555,6 +699,17 @@ function indexSolFile(
       }
       if (!cm.has(name)) {
         cm.set(name, info);
+      }
+      let om = overloadsByContract.get(contract);
+      if (!om) {
+        om = new Map<string, FunctionInfo[]>();
+        overloadsByContract.set(contract, om);
+      }
+      const list = om.get(name);
+      if (list) {
+        list.push(info);
+      } else {
+        om.set(name, [info]);
       }
     }
   }
@@ -640,16 +795,46 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
   const functions = new Map<string, FunctionInfo>();
   const hasBody = new Map<string, boolean>();
   const functionsByContract = new Map<string, Map<string, FunctionInfo>>();
+  const overloadsByContract = new Map<string, Map<string, FunctionInfo[]>>();
   const contractBases = new Map<string, string[]>();
   const varTypesByContract = new Map<string, Map<string, string>>();
   const modifiersByContract = new Map<string, Map<string, ModifierDef>>();
   const defs: FunctionDef[] = [];
+
+  // Gather files: the project tree (skips node_modules) PLUS the dependency
+  // dirs the project's remappings point to (which may live under node_modules,
+  // e.g. @openzeppelin/contracts-upgradeable). Dedup by real path so files
+  // reachable both ways (lib/) are indexed once.
+  const seenReal = new Set<string>();
+  const filesToIndex: string[] = [];
+  const addFile = (f: string) => {
+    let key = f;
+    try {
+      key = fs.realpathSync(f);
+    } catch {
+      /* keep raw path */
+    }
+    if (!seenReal.has(key)) {
+      seenReal.add(key);
+      filesToIndex.push(f);
+    }
+  };
   for (const file of walkSolFiles(projectPath)) {
+    addFile(file);
+  }
+  const visitedDirs = new Set<string>();
+  const budget = { left: 6000 }; // safety cap on remapping-sourced files
+  for (const dir of readRemappingDirs(projectPath)) {
+    walkRemappedDir(dir, addFile, visitedDirs, budget);
+  }
+
+  for (const file of filesToIndex) {
     indexSolFile(
       file,
       functions,
       hasBody,
       functionsByContract,
+      overloadsByContract,
       contractBases,
       varTypesByContract,
       modifiersByContract,
@@ -694,6 +879,7 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
   const result: SlitherResult = {
     functions,
     functionsByContract,
+    overloadsByContract,
     contractBases,
     varTypesByContract,
     modifiersByContract,
@@ -706,6 +892,7 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
     const cls = classifyCallSites(result, info.contract, sites);
     info.calls = cls.calls;
     info.memberCalls = cls.memberCalls;
+    info.callArity = cls.callArity;
     info.modifiers = resolveModifiers(result, info.contract, info.modifierNames);
   }
 
@@ -792,20 +979,23 @@ export function classifyCallSites(
   result: SlitherResult,
   contract: string | undefined,
   sites: CallSite[]
-): { calls: string[]; memberCalls: MemberCall[] } {
+): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number> } {
   const calls = new Set<string>();
   const memberCalls: MemberCall[] = [];
   const seen = new Set<string>();
+  const callArity: Record<string, number> = {};
 
   for (const s of sites) {
     if (s.recv === null || s.recv === 'this') {
       // Internal call.
       if (contract && resolvableInType(result, contract, s.name)) {
         calls.add(s.name);
+        callArity[s.name] = s.argCount;
       }
     } else if (s.recv === 'super') {
       if (contract && searchBases(result.functionsByContract, result.contractBases, contract, s.name)) {
         calls.add(s.name);
+        callArity[s.name] = s.argCount;
       }
     } else if (s.recv) {
       // Member call on a variable.
@@ -816,10 +1006,11 @@ export function classifyCallSites(
           seen.add(key);
           memberCalls.push({ recv: s.recv, method: s.name, contract: type });
         }
+        callArity[s.name] = s.argCount;
       }
     }
   }
-  return { calls: [...calls], memberCalls };
+  return { calls: [...calls], memberCalls, callArity };
 }
 
 /** Classify the call sites of an arbitrary body (used for the first card). */
@@ -827,7 +1018,7 @@ export function classifyCalls(
   result: SlitherResult,
   contract: string | undefined,
   body: string
-): { calls: string[]; memberCalls: MemberCall[] } {
+): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number> } {
   return classifyCallSites(result, contract, extractCallSites(body));
 }
 
@@ -839,15 +1030,68 @@ export function classifyCalls(
  * fallback - an unresolved call returns null rather than a same-named function
  * from an unrelated contract.
  */
+/** Pick the overload whose parameter count matches `argCount` (else null). */
+function pickOverload(list: FunctionInfo[] | undefined, argCount: number): FunctionInfo | null {
+  if (!list) {
+    return null;
+  }
+  return list.find((f) => f.paramCount === argCount) || null;
+}
+
+/** Search the base chain for an overload of `name` with matching arity. */
+function searchOverloadBases(
+  overloadsByContract: Map<string, Map<string, FunctionInfo[]>>,
+  contractBases: Map<string, string[]>,
+  contract: string,
+  name: string,
+  argCount: number
+): FunctionInfo | null {
+  const visited = new Set<string>();
+  const queue = [...(contractBases.get(contract) || [])].reverse();
+  while (queue.length) {
+    const base = queue.shift() as string;
+    if (visited.has(base)) {
+      continue;
+    }
+    visited.add(base);
+    const ov = pickOverload(overloadsByContract.get(base)?.get(name), argCount);
+    if (ov) {
+      return ov;
+    }
+    for (const x of [...(contractBases.get(base) || [])].reverse()) {
+      if (!visited.has(x)) {
+        queue.push(x);
+      }
+    }
+  }
+  return null;
+}
+
 export function resolveCall(
   result: SlitherResult,
   name: string,
   fromContract?: string,
   isSuper?: boolean,
-  strict?: boolean
+  strict?: boolean,
+  argCount?: number
 ): FunctionInfo | null {
-  const { functions, functionsByContract, contractBases } = result;
+  const { functions, functionsByContract, overloadsByContract, contractBases } = result;
   if (fromContract) {
+    // Arity-aware: when the call site's argument count is known, prefer the
+    // overload whose parameter count matches (this is how Solidity dispatches
+    // overloaded functions). Falls through to name-only resolution otherwise.
+    if (argCount != null) {
+      if (!isSuper) {
+        const ownOv = pickOverload(overloadsByContract.get(fromContract)?.get(name), argCount);
+        if (ownOv) {
+          return ownOv;
+        }
+      }
+      const baseOv = searchOverloadBases(overloadsByContract, contractBases, fromContract, name, argCount);
+      if (baseOv) {
+        return baseOv;
+      }
+    }
     if (!isSuper) {
       const own = functionsByContract.get(fromContract)?.get(name);
       if (own) {

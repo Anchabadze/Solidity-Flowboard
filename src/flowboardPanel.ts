@@ -10,7 +10,8 @@ type ExpandCallback = (
   fromId?: string,
   childId?: string,
   fromContract?: string,
-  isSuper?: boolean
+  isSuper?: boolean,
+  argCount?: number
 ) => void;
 
 /** A random CSP nonce for the inline strings script. */
@@ -77,7 +78,8 @@ export class FlowboardPanel {
                 message.fromId,
                 message.childId,
                 message.fromContract,
-                message.isSuper
+                message.isSuper,
+                message.argCount
               );
             }
             break;
@@ -155,6 +157,7 @@ export class FlowboardPanel {
       code,
       calls: info.calls,
       memberCalls: info.memberCalls ?? [],
+      callArity: info.callArity ?? {},
       modifiers: info.modifiers ?? [],
       file: path.basename(info.file),
       fsPath: info.file,

@@ -1,5 +1,10 @@
 # Change Log
 
+## 1.0.2
+
+- Overloaded functions resolve correctly: a call now opens the overload whose argument count matches (e.g. `f(a)` vs `f(a, b, c)`), instead of always opening the first definition.
+- Dependency sources referenced via remappings (`remappings.txt` / `foundry.toml`) are now indexed even when they live under `node_modules` (including pnpm symlinks) — so calls into them (e.g. OpenZeppelin upgradeable contracts) are highlighted and navigable.
+
 ## 1.0.1
 
 - Documentation: installation instructions for Open VSX — search-and-install in Cursor/VSCodium/Windsurf/Gitpod, and VSIX download for Visual Studio Code.

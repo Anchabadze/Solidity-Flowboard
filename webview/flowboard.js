@@ -307,10 +307,12 @@ function highlightSolidity(code, model) {
         }
 
         if (clickable) {
+          const arity = model.callArity ? model.callArity[ident] : undefined;
           out +=
             '<span class="call" data-call="' + esc(ident) + '"' +
             (isSuper ? ' data-super="1"' : '') +
             (contract ? ' data-contract="' + esc(contract) + '"' : '') +
+            (arity != null ? ' data-arity="' + arity + '"' : '') +
             ' title="' + esc((L.expand || '{name}').replace('{name}', ident)) + '">' + ident + '</span>';
         } else {
           out += ident; // identifiers are alphanumeric/underscore - safe
@@ -360,7 +362,8 @@ function activateCall(targetName, fromId, opts) {
     fromId: fromId,
     childId: childId,
     fromContract: fromContract,
-    isSuper: !!(opts && opts.isSuper)
+    isSuper: !!(opts && opts.isSuper),
+    argCount: opts && opts.argCount != null ? opts.argCount : undefined
   });
 }
 
@@ -653,7 +656,8 @@ function renderCodeBody(model) {
       e.stopPropagation();
       activateCall(el.dataset.call, model.id, {
         isSuper: el.dataset.super === '1',
-        contract: el.dataset.contract || null
+        contract: el.dataset.contract || null,
+        argCount: el.dataset.arity != null ? Number(el.dataset.arity) : undefined
       });
     });
   });
@@ -776,6 +780,8 @@ function addCard(data, opts) {
     // Resolvable calls: internal method names + member-call map "recv method" -> type.
     internalSet: new Set(data.calls || []),
     memberMap: new Map((data.memberCalls || []).map((mc) => [mc.recv + ' ' + mc.method, mc.contract])),
+    // Call name -> argument count, to resolve overloads (same name, different arity).
+    callArity: data.callArity || {},
     // Developer comments stripped; AI comments attach to these line numbers.
     clean: data.notFound ? data.code : stripComments(data.code),
     data: {
@@ -786,6 +792,7 @@ function addCard(data, opts) {
       code: data.code,
       calls: data.calls || [],
       memberCalls: data.memberCalls || [],
+      callArity: data.callArity || {},
       modifiers: data.modifiers || [],
       file: data.file,
       fsPath: data.fsPath,

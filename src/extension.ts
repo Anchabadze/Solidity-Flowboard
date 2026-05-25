@@ -38,11 +38,13 @@ function pushFunction(
   parentId?: string,
   id?: string,
   fromContract?: string,
-  isSuper?: boolean
+  isSuper?: boolean,
+  argCount?: number
 ): void {
   // Strict: a member/internal call resolves only within the receiver's type +
-  // its bases, never to a same-named function in an unrelated contract.
-  const info = resolveCall(result, name, fromContract, isSuper, true);
+  // its bases, never to a same-named function in an unrelated contract. argCount
+  // disambiguates overloads (same name, different parameter counts).
+  const info = resolveCall(result, name, fromContract, isSuper, true, argCount);
   if (!info) {
     panel.addMissing(name, parentId, id);
     return;
@@ -94,8 +96,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
       // Wire up arrow clicks -> expand the next function in the flow.
       panel.onExpandCall(
-        (name: string, fromId?: string, childId?: string, fromContract?: string, isSuper?: boolean) => {
-          pushFunction(panel, result, name, fromId, childId, fromContract, isSuper);
+        (name: string, fromId?: string, childId?: string, fromContract?: string, isSuper?: boolean, argCount?: number) => {
+          pushFunction(panel, result, name, fromId, childId, fromContract, isSuper, argCount);
         }
       );
 
@@ -111,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
         endLine: enclosing.endLine,
         calls: cls.calls,
         memberCalls: cls.memberCalls,
+        callArity: cls.callArity,
         modifiers: resolveModifiers(result, enclosing.contract, enclosing.modifierNames),
         contract: enclosing.contract
       };
