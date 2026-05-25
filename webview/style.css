@@ -1,0 +1,667 @@
+:root {
+  --bg: #1e1e1e;
+  --fg: #d4d4d4;
+  --card-bg: #252526;
+  --border: #3e3e42;
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --code-bg: #1e1e1e;
+  --code-fg: #9cdcfe;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* Toolbar ----------------------------------------------------------------- */
+#toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  background: #2d2d30;
+  border-bottom: 1px solid #3e3e42;
+  z-index: 1000;
+}
+
+#toolbar .brand {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+#toolbar .hint {
+  color: #8a8a8a;
+  font-size: 11px;
+}
+
+#zoom-level {
+  margin-left: auto;
+  color: #8a8a8a;
+  font-size: 11px;
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#clear-btn,
+#undo-btn,
+#save-btn,
+#add-note-btn,
+#mode-btn,
+#search-btn,
+#link-btn {
+  background: transparent;
+  color: #d4d4d4;
+  border: 1px solid #3e3e42;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#clear-btn:hover,
+#undo-btn:hover,
+#save-btn:hover,
+#add-note-btn:hover,
+#mode-btn:hover,
+#search-btn:hover,
+#link-btn:hover {
+  background: #3e3e42;
+}
+
+#toolbar button.active {
+  background: #0e639c;
+  color: #fff;
+  border-color: #0e639c;
+}
+
+#undo-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Connect (line-drawing) mode */
+#flowboard.mode-connect {
+  cursor: crosshair;
+}
+
+.card.link-source,
+.note.link-source {
+  outline: 2px dashed #ffb454;
+  outline-offset: 1px;
+}
+
+#mode-btn {
+  min-width: 84px;
+}
+
+/* Search panel (Ctrl+F) */
+#search-panel {
+  position: fixed;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 460px;
+  max-width: 90vw;
+  background: #252526;
+  border: 1px solid #3e3e42;
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  z-index: 2000;
+  overflow: hidden;
+}
+
+#search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border: none;
+  border-bottom: 1px solid #3e3e42;
+  padding: 8px 12px;
+  font-size: 13px;
+  outline: none;
+}
+
+#search-results {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.search-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #2a2a2c;
+}
+
+.search-item:hover {
+  background: #094771;
+}
+
+.search-name {
+  color: #4ec9b0;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-sub {
+  color: #858585;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.search-empty {
+  padding: 8px 12px;
+  color: #858585;
+  font-size: 12px;
+}
+
+/* Flowboard surface ------------------------------------------------------ */
+#flowboard {
+  position: absolute;
+  top: 36px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden; /* panning/zoom replaces scrollbars */
+  cursor: grab;
+  background-color: #1e1e1e;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+#flowboard.panning {
+  cursor: grabbing;
+}
+
+#flowboard:focus {
+  outline: none;
+}
+
+/* Select mode: arrow cursor, marquee selection instead of panning. */
+#flowboard.mode-select {
+  cursor: default;
+}
+
+.marquee {
+  position: absolute;
+  border: 1px dashed #4daafc;
+  background: rgba(77, 170, 252, 0.12);
+  pointer-events: none;
+  z-index: 50;
+}
+
+/* The transformed layer that holds all cards and edges. */
+#world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+#edges {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 12000px;
+  height: 12000px;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 1;
+}
+
+.edge-line {
+  fill: none;
+  stroke: #0e639c;
+  stroke-width: 2;
+  opacity: 0.55;
+}
+
+#empty-state {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #6a6a6a;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Cards ------------------------------------------------------------------- */
+.card {
+  position: absolute;
+  width: max-content;
+  min-width: 280px;
+  max-width: 1200px;
+  display: flex;
+  flex-direction: column;
+  background: #252526;
+  border: 1px solid #3e3e42;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  cursor: default;
+  z-index: 2;
+}
+
+.card.dragging {
+  z-index: 999;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+/* Multi-selection highlight (select mode). */
+.card.selected,
+.note.selected {
+  outline: 2px solid #4daafc;
+  outline-offset: 1px;
+}
+
+.card.not-found {
+  border-color: #6a4a00;
+}
+
+.card.flash {
+  animation: flash 0.7s ease-out;
+}
+
+@keyframes flash {
+  0% {
+    box-shadow: 0 0 0 2px #1177bb;
+  }
+  100% {
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* Modifier chips - float ABOVE the card (no card background behind them), but
+   stay children of .card so they move with it. The small gap matches the old
+   top padding. Font size/weight match the function-name title (13px / 600). */
+.card-modifiers {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  max-width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.modifier-chip {
+  font-family: 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2937;
+  background: #ffffff;
+  padding: 3px 10px;
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.modifier-chip.chip-link {
+  cursor: pointer;
+}
+
+.modifier-chip.chip-link:hover {
+  background: #eef2ff;
+  border-color: #6366f1;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #333337;
+  border-bottom: 1px solid #3e3e42;
+  border-radius: 4px 4px 0 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.card-header:active {
+  cursor: grabbing;
+}
+
+/* Header colour by visibility */
+.card-header.hdr-public {
+  background: #1dad13; /* external / public */
+}
+
+.card-header.hdr-internal {
+  background: #e5e7eb; /* internal / private */
+}
+
+.card-header.hdr-public .card-title,
+.card-header.hdr-internal .card-title {
+  color: #1f2937;
+}
+
+.card-header.hdr-public .card-meta,
+.card-header.hdr-internal .card-meta {
+  color: #374151;
+}
+
+/* "payable" badge in the header */
+.hdr-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #1f2937;
+  color: #fbbf24;
+}
+
+/* Emoji trait badges after the function name (same size as the title). */
+.hdr-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.hdr-emoji {
+  font-size: 13px;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+
+.card-title {
+  font-weight: 600;
+  color: #4ec9b0;
+  font-family: 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Selectable so the Contract::function name can be copied. */
+  user-select: text;
+  cursor: text;
+}
+
+.card-meta {
+  color: #858585;
+  font-size: 10px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.meta-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+.meta-link:hover {
+  color: #4daafc;
+}
+
+/* Header AI action buttons */
+.card-actions {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.hdr-btn {
+  background: #3a3a3d;
+  color: #d4d4d4;
+  border: 1px solid #3e3e42;
+  border-radius: 3px;
+  font-size: 10px;
+  padding: 1px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hdr-btn:hover {
+  background: #4a4a4e;
+}
+
+.hdr-btn.active {
+  background: #0e639c;
+  color: #fff;
+  border-color: #0e639c;
+}
+
+.hdr-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Code -------------------------------------------------------------------- */
+.card-code {
+  margin: 0;
+  padding: 10px;
+  overflow: visible; /* show the whole function body - no inner scrollbars */
+  background: #1e1e1e;
+  color: #9cdcfe;
+  font-family: 'SF Mono', 'Cascadia Code', Menlo, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.card-code code {
+  font-family: inherit;
+}
+
+.tok-comment {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.tok-string {
+  color: #ce9178;
+}
+
+.tok-number {
+  color: #b5cea8;
+}
+
+.tok-keyword {
+  color: #569cd6;
+}
+
+.tok-type {
+  color: #4ec9b0;
+}
+
+.call {
+  color: #dcdcaa;
+  background: rgba(14, 99, 156, 0.25);
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: pointer;
+  border-bottom: 1px dashed #0e639c;
+}
+
+.call:hover {
+  background: rgba(17, 119, 187, 0.5);
+}
+
+/* Per-line code rows + AI annotations */
+.code-line {
+  white-space: pre;
+}
+
+.ai-comment {
+  color: #6a9955;
+  font-style: italic;
+  white-space: pre-wrap;
+  padding: 1px 0 3px 0;
+  opacity: 0.95;
+}
+
+/* Function-level AI summary block at the top of a card */
+.ai-summary {
+  padding: 8px 11px;
+  background: #20232a;
+  border-bottom: 1px solid #3e3e42;
+  color: #cfcfcf;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  /* Fill the card's full width without widening it (width is driven by code). */
+  box-sizing: border-box;
+  width: 0;
+  min-width: 100%;
+}
+
+/* Text notes -------------------------------------------------------------- */
+.note {
+  position: absolute;
+  width: 240px; /* default width so pasted text wraps; overridden on resize */
+  min-width: 160px;
+  min-height: 48px;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px dashed #5a5a5e;
+  border-radius: 6px;
+  overflow: hidden;
+  z-index: 3;
+}
+
+.note-bar {
+  flex-wrap: wrap;
+}
+
+.note.dragging,
+.note.resizing {
+  z-index: 999;
+}
+
+.note-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px 6px 0 0;
+  cursor: grab;
+}
+
+.note-bar:active {
+  cursor: grabbing;
+}
+
+.note-color {
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.note-size {
+  background: #3e3e42;
+  color: #fff;
+  border: 1px solid #4e4e52;
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 1px 3px;
+  cursor: pointer;
+}
+
+.note-bold {
+  background: #3e3e42;
+  color: #fff;
+  border: 1px solid #4e4e52;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+
+.note-bold:hover {
+  background: #4e4e52;
+}
+
+.note-grip {
+  margin-left: auto;
+  color: #888;
+  cursor: grab;
+  user-select: none;
+  font-size: 13px;
+}
+
+.note-del {
+  background: transparent;
+  color: #cc8866;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.note-del:hover {
+  color: #ff7a59;
+}
+
+.note-text {
+  padding: 6px 9px;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  outline: none;
+  color: #1e1e1e;
+  line-height: 1.35;
+  white-space: pre-wrap; /* wrap to the window width, keep manual line breaks */
+  overflow-wrap: anywhere; /* break long unbreakable strings so nothing overflows */
+  overflow: auto;
+  cursor: text; /* I-beam (text caret) on hover, like a Word text box */
+}
+
+.note-text:empty::before {
+  content: attr(data-placeholder);
+  color: #777;
+}
+
+/* Bottom-right resize handle for notes. */
+.note-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 0 50%, #8a8a8e 50% 60%, transparent 60% 70%, #8a8a8e 70% 80%, transparent 80%);
+  z-index: 4;
+}

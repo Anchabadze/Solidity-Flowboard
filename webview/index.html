@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="{{lang}}">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; img-src {{cspSource}} https: data:; style-src {{cspSource}} 'unsafe-inline'; script-src {{cspSource}} 'nonce-{{nonce}}'; font-src {{cspSource}} data:;"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- CSS is inlined (not linked) so html2canvas can carry it into its render clone. -->
+  <style>{{styleContent}}</style>
+  <title>Solidity Flowboard</title>
+</head>
+<body>
+  <div id="toolbar">
+    <span class="brand">Solidity Flowboard</span>
+    <button id="mode-btn" type="button" title="{{t:modeTitle}}">{{t:modeHand}}</button>
+    <button id="search-btn" type="button" title="{{t:searchTitle}}">{{t:searchLabel}}</button>
+    <button id="link-btn" type="button" title="{{t:linkTitle}}">{{t:linkLabel}}</button>
+    <button id="add-note-btn" type="button" title="{{t:addNoteTitle}}">{{t:addNoteLabel}}</button>
+    <span id="zoom-level">100%</span>
+    <button id="undo-btn" type="button" title="{{t:undoTitle}}">{{t:undoLabel}}</button>
+    <button id="clear-btn" type="button" title="{{t:clearTitle}}">{{t:clearLabel}}</button>
+  </div>
+
+  <!-- Viewport: фиксированная область, внутри которой панорамируется/масштабируется #world -->
+  <div id="flowboard" tabindex="0">
+    <!-- Трансформируемый слой "мира": сюда складываются линии и карточки -->
+    <div id="world">
+      <!-- SVG слой для линий между карточками (под карточками) -->
+      <svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg>
+      <!-- Карточки функций добавляются сюда из flowboard.js -->
+    </div>
+  </div>
+
+  <div id="empty-state">{{t:emptyState}}</div>
+
+  <!-- Active-language UI strings, read synchronously by flowboard.js. -->
+  <script nonce="{{nonce}}">window.__L__ = {{stringsJson}};</script>
+  <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+</body>
+</html>

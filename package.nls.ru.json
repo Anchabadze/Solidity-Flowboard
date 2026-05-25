@@ -1,0 +1,10 @@
+{
+  "cmd.sendToFlowboard.title": "Отправить во Flowboard",
+  "cmd.openFlowboard.title": "Solidity Flowboard: открыть Flowboard",
+  "cfg.language.description": "Язык интерфейса и AI. По умолчанию английский; для русского выбери \"ru\". После смены перезагрузи окно.",
+  "cfg.language.ru": "Русский",
+  "cfg.language.en": "Английский",
+  "cfg.claudePath.description": "Путь к Claude Code CLI (используется для AI-аннотаций и анализа). По умолчанию ищется в PATH как \"claude\".",
+  "cfg.model.description": "Модель для AI-функций: алиас (\"opus\", \"sonnet\") или полное имя. Пусто — модель Claude Code по умолчанию.",
+  "cfg.codebaseContext.description": "Анализировать функцию в контексте всей кодовой базы: Claude запускается в корне проекта с доступом к чтению файлов (Read/Grep/Glob) и подтягивает связанный код. Точнее, но медленнее и расходует больше квоты подписки. Выключи для быстрого анализа только текста функции."
+}

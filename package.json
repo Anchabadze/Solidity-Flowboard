@@ -1,0 +1,103 @@
+{
+  "name": "solidity-flowboard",
+  "displayName": "Solidity Flowboard",
+  "description": "Trace Solidity function call flows card-by-card on a draggable canvas. Built for smart-contract auditors.",
+  "version": "1.0.0",
+  "publisher": "anchabadze",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Anchabadze/Solidity-Flowboard.git"
+  },
+  "homepage": "https://github.com/Anchabadze/Solidity-Flowboard#readme",
+  "bugs": {
+    "url": "https://github.com/Anchabadze/Solidity-Flowboard/issues"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "solidity",
+    "audit",
+    "security",
+    "smart-contracts",
+    "ethereum",
+    "evm",
+    "call-graph",
+    "web3",
+    "slither"
+  ],
+  "pricing": "Free",
+  "icon": "media/icon.png",
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:solidity"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "solidity-flowboard.sendToFlowboard",
+        "title": "%cmd.sendToFlowboard.title%"
+      },
+      {
+        "command": "solidity-flowboard.openFlowboard",
+        "title": "%cmd.openFlowboard.title%"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "solidity-flowboard.sendToFlowboard",
+          "when": "resourceExtname == .sol",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Solidity Flowboard",
+      "properties": {
+        "solidity-flowboard.language": {
+          "type": "string",
+          "enum": ["en", "ru"],
+          "enumDescriptions": [
+            "%cfg.language.en%",
+            "%cfg.language.ru%"
+          ],
+          "default": "en",
+          "description": "%cfg.language.description%"
+        },
+        "solidity-flowboard.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "%cfg.claudePath.description%"
+        },
+        "solidity-flowboard.model": {
+          "type": "string",
+          "default": "",
+          "description": "%cfg.model.description%"
+        },
+        "solidity-flowboard.codebaseContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "%cfg.codebaseContext.description%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "install-local": "npm run compile && rm -rf \"$HOME/.vscode-server/extensions/\"*.solidity-flowboard-* && mkdir -p \"$HOME/.vscode-server/extensions/anchabadze.solidity-flowboard-1.0.0\" && cp -r out webview media package.json package.nls.json package.nls.ru.json README.md \"$HOME/.vscode-server/extensions/anchabadze.solidity-flowboard-1.0.0/\""
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.5"
+  }
+}
