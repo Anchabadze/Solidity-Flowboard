@@ -634,6 +634,8 @@ function contractAt(contracts: ContractRange[], idx: number): string | undefined
 interface FunctionDef {
   info: FunctionInfo;
   sites: CallSite[];
+  /** Function-scoped variable types (params + locals), overriding contract-level. */
+  localVars: Map<string, string>;
 }
 
 /**
@@ -835,7 +837,11 @@ function indexSolFile(
     if (modifierNames.length) {
       info.modifierNames = modifierNames;
     }
-    defs.push({ info, sites: extractCallSites(body) });
+    // Function-scoped variable types: params + named returns + locals. Overrides
+    // the contract-level map so same-named locals in other functions don't clash.
+    const localVars = new Map<string, string>();
+    scanVarTypes(content.slice(paramOpen + 1, bodyClose), localVars);
+    defs.push({ info, sites: extractCallSites(body), localVars });
 
     // Global index: prefer an implementation over a bare declaration.
     if (!functions.has(name) || !hasBody.get(name)) {
@@ -901,7 +907,13 @@ function indexSolFile(
       contract: cContract,
       kind: 'constructor'
     };
-    defs.push({ info: cInfo, sites: extractCallSites(content.slice(marker + 1, bClose)) });
+    const cLocalVars = new Map<string, string>();
+    scanVarTypes(content.slice(pOpen + 1, bClose), cLocalVars);
+    defs.push({
+      info: cInfo,
+      sites: extractCallSites(content.slice(marker + 1, bClose)),
+      localVars: cLocalVars
+    });
     let cm = functionsByContract.get(cContract);
     if (!cm) {
       cm = new Map<string, FunctionInfo>();
@@ -1134,8 +1146,8 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
 
   // 3. Classify each definition's call sites (internal vs resolvable member)
   //    and resolve its modifiers to their definition locations.
-  for (const { info, sites } of defs) {
-    const cls = classifyCallSites(result, info.contract, sites);
+  for (const { info, sites, localVars } of defs) {
+    const cls = classifyCallSites(result, info.contract, sites, localVars);
     info.calls = cls.calls;
     info.memberCalls = cls.memberCalls;
     info.callArity = cls.callArity;
@@ -1241,16 +1253,20 @@ function lookupReceiverType(
 function resolveReceiverType(
   result: SlitherResult,
   contract: string | undefined,
-  s: CallSite
+  s: CallSite,
+  localVars?: Map<string, string>
 ): string | undefined {
+  // Function-scoped vars (params/locals) take precedence over contract state vars.
+  const varTypeOf = (name: string): string | undefined =>
+    localVars?.get(name) || (contract ? lookupReceiverType(result, contract, name) : undefined);
   if (s.recvChain && s.recvChain.length > 1) {
-    let t = contract ? lookupReceiverType(result, contract, s.recvChain[0]) : undefined;
+    let t = varTypeOf(s.recvChain[0]);
     for (let k = 1; k < s.recvChain.length && t; k++) {
       t = result.structFields.get(t)?.get(s.recvChain[k]);
     }
     return t;
   }
-  const varType = contract && s.recv ? lookupReceiverType(result, contract, s.recv) : undefined;
+  const varType = s.recv ? varTypeOf(s.recv) : undefined;
   return varType || s.recv || undefined;
 }
 
@@ -1277,7 +1293,8 @@ function resolveUsingFor(result: SlitherResult, type: string, method: string): s
 export function classifyCallSites(
   result: SlitherResult,
   contract: string | undefined,
-  sites: CallSite[]
+  sites: CallSite[],
+  localVars?: Map<string, string>
 ): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number>; newCalls: string[] } {
   const calls = new Set<string>();
   const memberCalls: MemberCall[] = [];
@@ -1308,7 +1325,7 @@ export function classifyCallSites(
       // Member call `recv.method()`. `recv` is either a variable (use its
       // declared type) or a library/contract name called directly, e.g.
       // `Math.mulDivRoundingUp(...)` or `SafeERC20.safeTransfer(...)`.
-      const type = resolveReceiverType(result, contract, s);
+      const type = resolveReceiverType(result, contract, s, localVars);
       let target: string | undefined;
       if (type && resolvableInType(result, type, s.name)) {
         target = type;
@@ -1334,7 +1351,12 @@ export function classifyCalls(
   contract: string | undefined,
   body: string
 ): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number>; newCalls: string[] } {
-  return classifyCallSites(result, contract, extractCallSites(body));
+  // Function-scoped var types from the body (locals); params aren't in `body`,
+  // but locals like `LaunchData memory data = ...` are - enough to override the
+  // contract-level map for same-named variables.
+  const localVars = new Map<string, string>();
+  scanVarTypes(body, localVars);
+  return classifyCallSites(result, contract, extractCallSites(body), localVars);
 }
 
 /**

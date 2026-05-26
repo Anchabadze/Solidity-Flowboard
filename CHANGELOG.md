@@ -1,5 +1,9 @@
 # Change Log
 
+## 1.0.7
+
+- Variable types are now resolved per function scope (parameters + locals) instead of per contract. Fixes member-call resolution when two functions declare same-named locals of different types (e.g. a local `data` typed `LaunchData` in one function and `SwapRemainingData` in another) — `data.curve.buy(...)` now correctly opens the curve implementation.
+
 ## 1.0.6
 
 - `using Lib for Type` / `using Lib for *` library methods are now resolved: a call like `token.safeTransfer(...)` (where `token` is `IERC20` with `using SafeERC20 for IERC20`) is clickable and opens the library function. Works for variable, cast, and struct-field receivers (e.g. `buyData.token.safeTransfer(...)` resolves through the struct field's type).
