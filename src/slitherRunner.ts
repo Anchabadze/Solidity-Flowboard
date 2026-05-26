@@ -78,6 +78,12 @@ export interface SlitherResult {
   implementers: Map<string, string[]>;
   /** structName -> its definition location (so struct literals are navigable). */
   structs: Map<string, FunctionInfo>;
+  /** structName -> (fieldName -> typeName), for resolving `var.field.method()`. */
+  structFields: Map<string, Map<string, string>>;
+  /** `using Lib for Type` directives: typeName -> attached library names. */
+  usingFor: Map<string, Set<string>>;
+  /** Libraries attached to every type via `using Lib for *`. */
+  usingForWildcard: Set<string>;
   /** false only when the `slither` binary itself could not be found. */
   slitherAvailable: boolean;
 }
@@ -360,6 +366,8 @@ interface CallSite {
   argCount: number;
   /** True when preceded by `new` (contract construction → resolves to the constructor). */
   isNew?: boolean;
+  /** Full dotted receiver chain (e.g. ['buyData','token']) for struct-field receivers. */
+  recvChain?: string[];
 }
 
 /**
@@ -437,6 +445,7 @@ function extractCallSites(body: string): CallSite[] {
       }
     }
     let recv: string | null = null;
+    let recvChain: string[] | undefined;
     if (i >= 0 && body[i] === '.') {
       i--;
       while (i >= 0 && /\s/.test(body[i])) {
@@ -465,10 +474,38 @@ function extractCallSites(body: string): CallSite[] {
         while (i >= 0 && /[\w$]/.test(body[i])) {
           i--;
         }
-        recv = body.slice(i + 1, end); // identifier receiver
+        recv = body.slice(i + 1, end); // innermost identifier receiver
+        // Walk further back over `.ident` to capture the full dotted chain, so
+        // a struct-field receiver like `buyData.token` resolves through fields.
+        const chain = [recv];
+        let j = i;
+        for (;;) {
+          while (j >= 0 && /\s/.test(body[j])) {
+            j--;
+          }
+          if (!(j >= 0 && body[j] === '.')) {
+            break;
+          }
+          j--;
+          while (j >= 0 && /\s/.test(body[j])) {
+            j--;
+          }
+          const e2 = j + 1;
+          while (j >= 0 && /[\w$]/.test(body[j])) {
+            j--;
+          }
+          const id2 = body.slice(j + 1, e2);
+          if (!id2) {
+            break;
+          }
+          chain.unshift(id2);
+        }
+        if (chain.length > 1) {
+          recvChain = chain;
+        }
       }
     }
-    sites.push({ name, recv, argCount, isNew });
+    sites.push({ name, recv, argCount, isNew, recvChain });
   }
   return sites;
 }
@@ -614,6 +651,9 @@ function indexSolFile(
   varTypesByContract: Map<string, Map<string, string>>,
   modifiersByContract: Map<string, Map<string, ModifierDef>>,
   structs: Map<string, FunctionInfo>,
+  structFields: Map<string, Map<string, string>>,
+  usingFor: Map<string, Set<string>>,
+  usingForWildcard: Set<string>,
   defs: FunctionDef[]
 ): void {
   let content: string;
@@ -708,6 +748,36 @@ function indexSolFile(
       contract: contractAt(contracts, sm.index),
       kind: 'struct'
     });
+    // Field types, so `var.field.method()` can resolve through the field's type.
+    const fields = new Map<string, string>();
+    const fieldRe = /([A-Za-z_$][\w$.]*)(?:\[\])?\s+([A-Za-z_$][\w$]*)\s*;/g;
+    let fm: RegExpExecArray | null;
+    const sBody = content.slice(sOpen + 1, sClose);
+    while ((fm = fieldRe.exec(sBody)) !== null) {
+      const ftype = (fm[1].split('.').pop() as string);
+      fields.set(fm[2], ftype);
+    }
+    structFields.set(sName, fields);
+  }
+
+  // `using Lib for Type;` / `using Lib for *;` directives (contract or file scope).
+  // Recorded project-wide: lets `x.libFn()` resolve to the attached library.
+  const usingRe = /\busing\s+([\w$.]+)\s+for\s+([\w$.[\]*]+)(?:\s+global)?\s*;/g;
+  let um: RegExpExecArray | null;
+  while ((um = usingRe.exec(content)) !== null) {
+    const lib = um[1].split('.').pop() as string;
+    const rawType = um[2].replace(/\[\]$/, '');
+    if (rawType === '*') {
+      usingForWildcard.add(lib);
+    } else {
+      const t = rawType.split('.').pop() as string;
+      let libs = usingFor.get(t);
+      if (!libs) {
+        libs = new Set<string>();
+        usingFor.set(t, libs);
+      }
+      libs.add(lib);
+    }
   }
 
   const fnRe = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g;
@@ -936,6 +1006,9 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
   const varTypesByContract = new Map<string, Map<string, string>>();
   const modifiersByContract = new Map<string, Map<string, ModifierDef>>();
   const structs = new Map<string, FunctionInfo>();
+  const structFields = new Map<string, Map<string, string>>();
+  const usingFor = new Map<string, Set<string>>();
+  const usingForWildcard = new Set<string>();
   const defs: FunctionDef[] = [];
 
   // Gather files: the project tree (skips node_modules) PLUS the dependency
@@ -976,6 +1049,9 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
       varTypesByContract,
       modifiersByContract,
       structs,
+      structFields,
+      usingFor,
+      usingForWildcard,
       defs
     );
   }
@@ -1050,6 +1126,9 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
     modifiersByContract,
     implementers,
     structs,
+    structFields,
+    usingFor,
+    usingForWildcard,
     slitherAvailable
   };
 
@@ -1126,11 +1205,6 @@ function resolvableInType(result: SlitherResult, type: string, method: string): 
   return false;
 }
 
-/** True if `name` is an in-project contract/library/interface (a usable type). */
-function isProjectType(result: SlitherResult, name: string): boolean {
-  return result.functionsByContract.has(name) || result.contractBases.has(name);
-}
-
 /** Find the declared type of variable `recv` visible in `contract` (+ bases). */
 function lookupReceiverType(
   result: SlitherResult,
@@ -1153,6 +1227,42 @@ function lookupReceiverType(
       if (!visited.has(b)) {
         queue.push(b);
       }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the static type of a call's receiver:
+ * - dotted chain `a.b.c` → walk struct fields (a's type → field b → field c);
+ * - single identifier → the variable's declared type, else the identifier
+ *   itself (library/contract name, or a cast type such as `address`/`Foo`).
+ */
+function resolveReceiverType(
+  result: SlitherResult,
+  contract: string | undefined,
+  s: CallSite
+): string | undefined {
+  if (s.recvChain && s.recvChain.length > 1) {
+    let t = contract ? lookupReceiverType(result, contract, s.recvChain[0]) : undefined;
+    for (let k = 1; k < s.recvChain.length && t; k++) {
+      t = result.structFields.get(t)?.get(s.recvChain[k]);
+    }
+    return t;
+  }
+  const varType = contract && s.recv ? lookupReceiverType(result, contract, s.recv) : undefined;
+  return varType || s.recv || undefined;
+}
+
+/**
+ * `using Lib for Type` (and `using Lib for *`): if `method` isn't a member of
+ * `type` but is provided by an attached library, return that library's name.
+ */
+function resolveUsingFor(result: SlitherResult, type: string, method: string): string | undefined {
+  const libs = [...(result.usingFor.get(type) || []), ...result.usingForWildcard];
+  for (const lib of libs) {
+    if (resolvableInType(result, lib, method)) {
+      return lib;
     }
   }
   return undefined;
@@ -1198,15 +1308,18 @@ export function classifyCallSites(
       // Member call `recv.method()`. `recv` is either a variable (use its
       // declared type) or a library/contract name called directly, e.g.
       // `Math.mulDivRoundingUp(...)` or `SafeERC20.safeTransfer(...)`.
-      let type = contract ? lookupReceiverType(result, contract, s.recv) : undefined;
-      if (!type && isProjectType(result, s.recv)) {
-        type = s.recv;
-      }
+      const type = resolveReceiverType(result, contract, s);
+      let target: string | undefined;
       if (type && resolvableInType(result, type, s.name)) {
-        const key = s.recv + ' ' + s.name;
+        target = type;
+      } else if (type) {
+        target = resolveUsingFor(result, type, s.name);
+      }
+      if (target) {
+        const key = s.recv + ' ' + s.name;
         if (!seen.has(key)) {
           seen.add(key);
-          memberCalls.push({ recv: s.recv, method: s.name, contract: type });
+          memberCalls.push({ recv: s.recv, method: s.name, contract: target });
         }
         callArity[s.name] = s.argCount;
       }

@@ -1,5 +1,9 @@
 # Change Log
 
+## 1.0.6
+
+- `using Lib for Type` / `using Lib for *` library methods are now resolved: a call like `token.safeTransfer(...)` (where `token` is `IERC20` with `using SafeERC20 for IERC20`) is clickable and opens the library function. Works for variable, cast, and struct-field receivers (e.g. `buyData.token.safeTransfer(...)` resolves through the struct field's type).
+
 ## 1.0.5
 
 - Contract construction is navigable: `new Contract(...)` is clickable and opens the contract's `constructor`.
