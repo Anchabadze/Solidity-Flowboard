@@ -159,6 +159,7 @@ export class FlowboardPanel {
       memberCalls: info.memberCalls ?? [],
       callArity: info.callArity ?? {},
       modifiers: info.modifiers ?? [],
+      kind: info.kind ?? null,
       file: path.basename(info.file),
       fsPath: info.file,
       startLine: info.startLine,

@@ -52,6 +52,8 @@ export interface FunctionInfo {
   modifiers?: ResolvedModifier[];
   /** Name of the contract/interface/library that defines this function. */
   contract?: string;
+  /** 'struct' when this card is a struct definition rather than a function. */
+  kind?: 'struct';
   /** Raw body text (only set by getEnclosingFunction, for the first card). */
   body?: string;
 }
@@ -69,6 +71,11 @@ export interface SlitherResult {
   varTypesByContract: Map<string, Map<string, string>>;
   /** contractName -> (modifierName -> definition location). */
   modifiersByContract: Map<string, Map<string, ModifierDef>>;
+  /** base/interface name -> in-project contracts that inherit it (transitively).
+   *  Lets a call on an interface-typed receiver resolve to a concrete implementer. */
+  implementers: Map<string, string[]>;
+  /** structName -> its definition location (so struct literals are navigable). */
+  structs: Map<string, FunctionInfo>;
   /** false only when the `slither` binary itself could not be found. */
   slitherAvailable: boolean;
 }
@@ -378,6 +385,22 @@ function countArgs(text: string): number {
   return sawContent ? count + 1 : 0;
 }
 
+/** From a ')' at `closeIdx`, return the index of its matching '(' (or -1). */
+function matchParenBackward(s: string, closeIdx: number): number {
+  let depth = 0;
+  for (let i = closeIdx; i >= 0; i--) {
+    if (s[i] === ')') {
+      depth++;
+    } else if (s[i] === '(') {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
 /** Extract every call occurrence from a function body with its receiver and arity. */
 function extractCallSites(body: string): CallSite[] {
   const sites: CallSite[] = [];
@@ -403,11 +426,31 @@ function extractCallSites(body: string): CallSite[] {
       while (i >= 0 && /\s/.test(body[i])) {
         i--;
       }
-      const end = i + 1;
-      while (i >= 0 && /[\w$]/.test(body[i])) {
-        i--;
+      if (i >= 0 && body[i] === ')') {
+        // Cast/chained receiver: `Type(expr).method` (or `foo().method`). Take
+        // the identifier just before the matching '(' - the cast type for
+        // `LaunchToken(token).mint(...)` style calls.
+        const open = matchParenBackward(body, i);
+        if (open === -1) {
+          recv = '';
+        } else {
+          let j = open - 1;
+          while (j >= 0 && /\s/.test(body[j])) {
+            j--;
+          }
+          const end = j + 1;
+          while (j >= 0 && /[\w$]/.test(body[j])) {
+            j--;
+          }
+          recv = body.slice(j + 1, end);
+        }
+      } else {
+        const end = i + 1;
+        while (i >= 0 && /[\w$]/.test(body[i])) {
+          i--;
+        }
+        recv = body.slice(i + 1, end); // identifier receiver
       }
-      recv = body.slice(i + 1, end); // identifier, or '' for a cast/chain receiver
     }
     sites.push({ name, recv, argCount });
   }
@@ -554,6 +597,7 @@ function indexSolFile(
   contractBases: Map<string, string[]>,
   varTypesByContract: Map<string, Map<string, string>>,
   modifiersByContract: Map<string, Map<string, ModifierDef>>,
+  structs: Map<string, FunctionInfo>,
   defs: FunctionDef[]
 ): void {
   let content: string;
@@ -623,6 +667,31 @@ function indexSolFile(
     if (!cmod.has(modName)) {
       cmod.set(modName, { file: filePath, startLine: modStart, endLine: modEnd, contract: modContract });
     }
+  }
+
+  // Struct definitions: `struct Name { ... }` (top-level or inside a contract).
+  // Recorded so struct literals like `Name({...})` can open the definition.
+  const structRe = /\bstruct\s+([A-Za-z_$][\w$]*)\s*\{/g;
+  let sm: RegExpExecArray | null;
+  while ((sm = structRe.exec(content)) !== null) {
+    const sName = sm[1];
+    if (structs.has(sName)) {
+      continue;
+    }
+    const sOpen = sm.index + sm[0].length - 1; // index of '{'
+    const sClose = findMatching(content, sOpen, '{', '}');
+    if (sClose === -1) {
+      continue;
+    }
+    structs.set(sName, {
+      name: sName,
+      file: filePath,
+      startLine: lineOf(content, sm.index),
+      endLine: lineOf(content, sClose),
+      calls: [],
+      contract: contractAt(contracts, sm.index),
+      kind: 'struct'
+    });
   }
 
   const fnRe = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g;
@@ -799,6 +868,7 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
   const contractBases = new Map<string, string[]>();
   const varTypesByContract = new Map<string, Map<string, string>>();
   const modifiersByContract = new Map<string, Map<string, ModifierDef>>();
+  const structs = new Map<string, FunctionInfo>();
   const defs: FunctionDef[] = [];
 
   // Gather files: the project tree (skips node_modules) PLUS the dependency
@@ -838,6 +908,7 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
       contractBases,
       varTypesByContract,
       modifiersByContract,
+      structs,
       defs
     );
   }
@@ -876,6 +947,33 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
     }
   }
 
+  // Reverse-index inheritance: for every contract that has function bodies,
+  // map each of its transitive ancestors (interfaces/abstract bases) to it. So
+  // a call on an interface-typed receiver can resolve to a concrete implementer.
+  const implementers = new Map<string, string[]>();
+  for (const contract of functionsByContract.keys()) {
+    const visited = new Set<string>();
+    const queue = [...(contractBases.get(contract) || [])];
+    while (queue.length) {
+      const base = queue.shift() as string;
+      if (visited.has(base)) {
+        continue;
+      }
+      visited.add(base);
+      const list = implementers.get(base);
+      if (list) {
+        list.push(contract);
+      } else {
+        implementers.set(base, [contract]);
+      }
+      for (const b of contractBases.get(base) || []) {
+        if (!visited.has(b)) {
+          queue.push(b);
+        }
+      }
+    }
+  }
+
   const result: SlitherResult = {
     functions,
     functionsByContract,
@@ -883,6 +981,8 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
     contractBases,
     varTypesByContract,
     modifiersByContract,
+    implementers,
+    structs,
     slitherAvailable
   };
 
@@ -934,12 +1034,28 @@ function searchBases(
   return null;
 }
 
-/** True if `method` has an in-project implementation in `type` or its bases. */
-function resolvableInType(result: SlitherResult, type: string, method: string): boolean {
+/** True if `method` has a body in `type` or its bases (no implementer lookup). */
+function resolvableDirect(result: SlitherResult, type: string, method: string): boolean {
   if (result.functionsByContract.get(type)?.has(method)) {
     return true;
   }
   return !!searchBases(result.functionsByContract, result.contractBases, type, method);
+}
+
+/**
+ * True if `method` is resolvable for receiver type `type`: directly (own + bases)
+ * or, when `type` is an interface/abstract, via a concrete project implementer.
+ */
+function resolvableInType(result: SlitherResult, type: string, method: string): boolean {
+  if (resolvableDirect(result, type, method)) {
+    return true;
+  }
+  for (const impl of result.implementers.get(type) || []) {
+    if (resolvableDirect(result, impl, method)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** True if `name` is an in-project contract/library/interface (a usable type). */
@@ -992,10 +1108,12 @@ export function classifyCallSites(
 
   for (const s of sites) {
     if (s.recv === null || s.recv === 'this') {
-      // Internal call.
+      // Internal call, or a struct literal `Name({...})` / `Name(...)`.
       if (contract && resolvableInType(result, contract, s.name)) {
         calls.add(s.name);
         callArity[s.name] = s.argCount;
+      } else if (result.structs.has(s.name)) {
+        calls.add(s.name); // clickable -> opens the struct definition
       }
     } else if (s.recv === 'super') {
       if (contract && searchBases(result.functionsByContract, result.contractBases, contract, s.name)) {
@@ -1077,6 +1195,36 @@ function searchOverloadBases(
   return null;
 }
 
+/** Resolve `name` within a single type `type` (own + bases), arity-aware. */
+function resolveInType(
+  result: SlitherResult,
+  type: string,
+  name: string,
+  isSuper: boolean,
+  argCount?: number
+): FunctionInfo | null {
+  const { functionsByContract, overloadsByContract, contractBases } = result;
+  if (argCount != null) {
+    if (!isSuper) {
+      const ownOv = pickOverload(overloadsByContract.get(type)?.get(name), argCount);
+      if (ownOv) {
+        return ownOv;
+      }
+    }
+    const baseOv = searchOverloadBases(overloadsByContract, contractBases, type, name, argCount);
+    if (baseOv) {
+      return baseOv;
+    }
+  }
+  if (!isSuper) {
+    const own = functionsByContract.get(type)?.get(name);
+    if (own) {
+      return own;
+    }
+  }
+  return searchBases(functionsByContract, contractBases, type, name);
+}
+
 export function resolveCall(
   result: SlitherResult,
   name: string,
@@ -1085,38 +1233,28 @@ export function resolveCall(
   strict?: boolean,
   argCount?: number
 ): FunctionInfo | null {
-  const { functions, functionsByContract, overloadsByContract, contractBases } = result;
   if (fromContract) {
-    // Arity-aware: when the call site's argument count is known, prefer the
-    // overload whose parameter count matches (this is how Solidity dispatches
-    // overloaded functions). Falls through to name-only resolution otherwise.
-    if (argCount != null) {
-      if (!isSuper) {
-        const ownOv = pickOverload(overloadsByContract.get(fromContract)?.get(name), argCount);
-        if (ownOv) {
-          return ownOv;
+    const direct = resolveInType(result, fromContract, name, !!isSuper, argCount);
+    if (direct) {
+      return direct;
+    }
+    // fromContract may be an interface/abstract type: resolve to a concrete
+    // project contract that implements it.
+    if (!isSuper) {
+      for (const impl of result.implementers.get(fromContract) || []) {
+        const r = resolveInType(result, impl, name, false, argCount);
+        if (r) {
+          return r;
         }
       }
-      const baseOv = searchOverloadBases(overloadsByContract, contractBases, fromContract, name, argCount);
-      if (baseOv) {
-        return baseOv;
-      }
-    }
-    if (!isSuper) {
-      const own = functionsByContract.get(fromContract)?.get(name);
-      if (own) {
-        return own;
-      }
-    }
-    const viaBase = searchBases(functionsByContract, contractBases, fromContract, name);
-    if (viaBase) {
-      return viaBase;
     }
     if (strict) {
-      return null;
+      // No same-named function fallback under strict, but a struct literal is a
+      // definite type reference - resolve it to the struct definition.
+      return result.structs.get(name) || null;
     }
   }
-  return functions.get(name) || null;
+  return result.functions.get(name) || result.structs.get(name) || null;
 }
 
 /** Search a contract's base chain for a modifier definition (super order). */

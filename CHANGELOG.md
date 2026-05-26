@@ -1,5 +1,11 @@
 # Change Log
 
+## 1.0.4
+
+- Calls on an interface-typed receiver resolve to a concrete contract that implements the interface in the project (e.g. `curve.initializeCurve(...)` where `curve` is an interface type opens the implementing contract).
+- Explicit cast receivers are navigable: `Type(expr).method(...)` (e.g. `LaunchToken(token).mint(...)`) is now highlighted and resolves to `Type`'s method.
+- Struct literals are clickable: `Name({...})` / `Name(...)` opens the struct definition.
+
 ## 1.0.3
 
 - Each call occurrence opens its own card: when a function is called multiple times in one body (e.g. two `_transferFrom(...)` calls), clicking each opens a separate window instead of toggling the same one.

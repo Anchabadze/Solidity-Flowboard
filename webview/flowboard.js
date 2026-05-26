@@ -238,6 +238,22 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
+/** From a ')' at closeIdx, return the index of its matching '(' (or -1). */
+function matchParenBackwardJS(s, closeIdx) {
+  let depth = 0;
+  for (let i = closeIdx; i >= 0; i--) {
+    if (s[i] === ')') {
+      depth++;
+    } else if (s[i] === '(') {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
 /**
  * Highlight Solidity source and mark CLICKABLE call tokens. A token is
  * clickable only if it resolves: an internal/this/super call resolvable in the
@@ -282,7 +298,18 @@ function highlightSolidity(code, model) {
           const dot = /\.\s*$/.test(before);
           if (dot) {
             const rm = /([A-Za-z_$][\w$]*)\s*\.\s*$/.exec(before);
-            const recv = rm ? rm[1] : '';
+            let recv = rm ? rm[1] : '';
+            if (!recv && /\)\s*\.\s*$/.test(before)) {
+              // Cast/chained receiver: `Type(expr).method` -> use the cast type.
+              const trimmed = before.replace(/\s*\.\s*$/, '');
+              const open = matchParenBackwardJS(trimmed, trimmed.length - 1);
+              if (open !== -1) {
+                const idm = /([A-Za-z_$][\w$]*)\s*$/.exec(trimmed.slice(0, open));
+                if (idm) {
+                  recv = idm[1];
+                }
+              }
+            }
             if (recv === 'super') {
               if (internalSet.has(ident)) {
                 clickable = true;
@@ -722,7 +749,10 @@ function addCard(data, opts) {
   const title = document.createElement('span');
   title.className = 'card-title';
   // Show Contract::function so the resolved target is always visible.
-  title.textContent = (data.contract ? data.contract + '::' : '') + data.name + '()';
+  // Structs are shown as "struct Name" (no parens) since they aren't callable.
+  const prefix = data.contract ? data.contract + '::' : '';
+  title.textContent =
+    data.kind === 'struct' ? prefix + 'struct ' + data.name : prefix + data.name + '()';
   header.appendChild(title);
 
   // Code-comments button (skipped for unresolved placeholder cards).
@@ -832,6 +862,7 @@ function addCard(data, opts) {
       memberCalls: data.memberCalls || [],
       callArity: data.callArity || {},
       modifiers: data.modifiers || [],
+      kind: data.kind || null,
       file: data.file,
       fsPath: data.fsPath,
       startLine: data.startLine,
