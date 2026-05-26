@@ -42,6 +42,8 @@ export interface FunctionInfo {
   calls: string[];
   /** Member calls `recv.method()` whose receiver type is an in-project contract. */
   memberCalls?: MemberCall[];
+  /** `new Type(...)` construction sites whose Type has a constructor in the project. */
+  newCalls?: string[];
   /** Number of declared parameters (used to resolve overloads by arity). */
   paramCount?: number;
   /** Call name -> argument count at its call site, so the UI can pick the right overload. */
@@ -52,8 +54,8 @@ export interface FunctionInfo {
   modifiers?: ResolvedModifier[];
   /** Name of the contract/interface/library that defines this function. */
   contract?: string;
-  /** 'struct' when this card is a struct definition rather than a function. */
-  kind?: 'struct';
+  /** Non-function card kinds: a struct definition or a contract constructor. */
+  kind?: 'struct' | 'constructor';
   /** Raw body text (only set by getEnclosingFunction, for the first card). */
   body?: string;
 }
@@ -356,6 +358,8 @@ interface CallSite {
   recv: string | null;
   /** Number of top-level arguments passed at this call site (for overload resolution). */
   argCount: number;
+  /** True when preceded by `new` (contract construction → resolves to the constructor). */
+  isNew?: boolean;
 }
 
 /**
@@ -420,6 +424,18 @@ function extractCallSites(body: string): CallSite[] {
     while (i >= 0 && /\s/.test(body[i])) {
       i--;
     }
+    // `new Type(...)` - the word right before the name is `new`.
+    let isNew = false;
+    {
+      let k = i;
+      const wordEnd = k + 1;
+      while (k >= 0 && /[\w$]/.test(body[k])) {
+        k--;
+      }
+      if (body.slice(k + 1, wordEnd) === 'new') {
+        isNew = true;
+      }
+    }
     let recv: string | null = null;
     if (i >= 0 && body[i] === '.') {
       i--;
@@ -452,7 +468,7 @@ function extractCallSites(body: string): CallSite[] {
         recv = body.slice(i + 1, end); // identifier receiver
       }
     }
-    sites.push({ name, recv, argCount });
+    sites.push({ name, recv, argCount, isNew });
   }
   return sites;
 }
@@ -782,6 +798,57 @@ function indexSolFile(
       }
     }
   }
+
+  // Constructors: `constructor(...) { ... }`. Indexed under the synthetic name
+  // "constructor" of their contract so `new Contract(...)` can open them.
+  const ctorRe = /\bconstructor\s*\(/g;
+  let cm2: RegExpExecArray | null;
+  while ((cm2 = ctorRe.exec(content)) !== null) {
+    const cContract = contractAt(contracts, cm2.index);
+    if (!cContract) {
+      continue;
+    }
+    const pOpen = cm2.index + cm2[0].length - 1; // '('
+    const pClose = findMatching(content, pOpen, '(', ')');
+    if (pClose === -1) {
+      continue;
+    }
+    const marker = scanForFirst(content, pClose + 1, new Set(['{', ';']));
+    if (marker === -1 || content[marker] === ';') {
+      continue;
+    }
+    const bClose = findMatching(content, marker, '{', '}');
+    if (bClose === -1) {
+      continue;
+    }
+    const cInfo: FunctionInfo = {
+      name: 'constructor',
+      file: filePath,
+      startLine: lineOf(content, cm2.index),
+      endLine: lineOf(content, bClose),
+      calls: [],
+      paramCount: countArgs(content.slice(pOpen + 1, pClose)),
+      contract: cContract,
+      kind: 'constructor'
+    };
+    defs.push({ info: cInfo, sites: extractCallSites(content.slice(marker + 1, bClose)) });
+    let cm = functionsByContract.get(cContract);
+    if (!cm) {
+      cm = new Map<string, FunctionInfo>();
+      functionsByContract.set(cContract, cm);
+    }
+    if (!cm.has('constructor')) {
+      cm.set('constructor', cInfo);
+    }
+    let om = overloadsByContract.get(cContract);
+    if (!om) {
+      om = new Map<string, FunctionInfo[]>();
+      overloadsByContract.set(cContract, om);
+    }
+    if (!om.has('constructor')) {
+      om.set('constructor', [cInfo]);
+    }
+  }
 }
 
 /** Strip a Slither node label down to a bare function name. */
@@ -993,6 +1060,7 @@ export async function runSlither(projectPath: string): Promise<SlitherResult> {
     info.calls = cls.calls;
     info.memberCalls = cls.memberCalls;
     info.callArity = cls.callArity;
+    info.newCalls = cls.newCalls;
     info.modifiers = resolveModifiers(result, info.contract, info.modifierNames);
   }
 
@@ -1100,14 +1168,20 @@ export function classifyCallSites(
   result: SlitherResult,
   contract: string | undefined,
   sites: CallSite[]
-): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number> } {
+): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number>; newCalls: string[] } {
   const calls = new Set<string>();
   const memberCalls: MemberCall[] = [];
   const seen = new Set<string>();
   const callArity: Record<string, number> = {};
+  const newCalls = new Set<string>();
 
   for (const s of sites) {
-    if (s.recv === null || s.recv === 'this') {
+    if (s.isNew) {
+      // `new Type(...)` - clickable if Type has a constructor in the project.
+      if (result.functionsByContract.get(s.name)?.has('constructor')) {
+        newCalls.add(s.name);
+      }
+    } else if (s.recv === null || s.recv === 'this') {
       // Internal call, or a struct literal `Name({...})` / `Name(...)`.
       if (contract && resolvableInType(result, contract, s.name)) {
         calls.add(s.name);
@@ -1138,7 +1212,7 @@ export function classifyCallSites(
       }
     }
   }
-  return { calls: [...calls], memberCalls, callArity };
+  return { calls: [...calls], memberCalls, callArity, newCalls: [...newCalls] };
 }
 
 /** Classify the call sites of an arbitrary body (used for the first card). */
@@ -1146,7 +1220,7 @@ export function classifyCalls(
   result: SlitherResult,
   contract: string | undefined,
   body: string
-): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number> } {
+): { calls: string[]; memberCalls: MemberCall[]; callArity: Record<string, number>; newCalls: string[] } {
   return classifyCallSites(result, contract, extractCallSites(body));
 }
 

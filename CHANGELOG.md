@@ -1,5 +1,9 @@
 # Change Log
 
+## 1.0.5
+
+- Contract construction is navigable: `new Contract(...)` is clickable and opens the contract's `constructor`.
+
 ## 1.0.4
 
 - Calls on an interface-typed receiver resolve to a concrete contract that implements the interface in the project (e.g. `curve.initializeCurve(...)` where `curve` is an interface type opens the implementing contract).

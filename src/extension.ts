@@ -114,6 +114,7 @@ export function activate(context: vscode.ExtensionContext): void {
         calls: cls.calls,
         memberCalls: cls.memberCalls,
         callArity: cls.callArity,
+        newCalls: cls.newCalls,
         modifiers: resolveModifiers(result, enclosing.contract, enclosing.modifierNames),
         contract: enclosing.contract
       };

@@ -293,6 +293,8 @@ function highlightSolidity(code, model) {
         let clickable = false;
         let isSuper = false;
         let contract = '';
+        // What to resolve on click (usually the token; for `new X` it's X's constructor).
+        let callName = ident;
 
         if (isCall && !isDef) {
           const dot = /\.\s*$/.test(before);
@@ -328,6 +330,11 @@ function highlightSolidity(code, model) {
                 contract = t;
               }
             }
+          } else if (/\bnew\s+$/.test(before) && model.newCallSet && model.newCallSet.has(ident)) {
+            // `new Type(...)` -> open Type's constructor.
+            clickable = true;
+            contract = ident;
+            callName = 'constructor';
           } else if (internalSet.has(ident)) {
             // Internal call (no receiver).
             clickable = true;
@@ -342,7 +349,7 @@ function highlightSolidity(code, model) {
           const site = model._site != null ? model._site : 0;
           model._site = site + 1;
           out +=
-            '<span class="call" data-call="' + esc(ident) + '" data-site="' + site + '"' +
+            '<span class="call" data-call="' + esc(callName) + '" data-site="' + site + '"' +
             (isSuper ? ' data-super="1"' : '') +
             (contract ? ' data-contract="' + esc(contract) + '"' : '') +
             (arity != null ? ' data-arity="' + arity + '"' : '') +
@@ -847,6 +854,8 @@ function addCard(data, opts) {
     // Resolvable calls: internal method names + member-call map "recv method" -> type.
     internalSet: new Set(data.calls || []),
     memberMap: new Map((data.memberCalls || []).map((mc) => [mc.recv + ' ' + mc.method, mc.contract])),
+    // Types constructed via `new X(...)` here, whose constructor is navigable.
+    newCallSet: new Set(data.newCalls || []),
     // Call name -> argument count, to resolve overloads (same name, different arity).
     callArity: data.callArity || {},
     // Developer comments stripped; AI comments attach to these line numbers.
@@ -861,6 +870,7 @@ function addCard(data, opts) {
       calls: data.calls || [],
       memberCalls: data.memberCalls || [],
       callArity: data.callArity || {},
+      newCalls: data.newCalls || [],
       modifiers: data.modifiers || [],
       kind: data.kind || null,
       file: data.file,
