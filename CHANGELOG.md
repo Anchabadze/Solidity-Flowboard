@@ -1,5 +1,11 @@
 # Change Log
 
+## 1.1.0
+
+- **Right-click context menu** on cards / notes / empty canvas with **Copy / Cut / Paste** (the system menu's clipboard items never worked on cards — these do).
+- **Open flow**: a new context-menu action on a function card that recursively expands every clickable call from that card down through the call tree. Loop prevention is per-path (a function only stops if it's already in the current ancestor chain), so the same function legitimately reached on two different branches gets its own card on each.
+- **Tier layout for Open flow**: cards are placed in depth columns (root → its calls → their calls → …) with no overlap, vertical stacking inside each column, and a wider gap between columns so the connecting arrows are visible. Each column is vertically centered around the root card.
+
 ## 1.0.7
 
 - Variable types are now resolved per function scope (parameters + locals) instead of per contract. Fixes member-call resolution when two functions declare same-named locals of different types (e.g. a local `data` typed `LaunchData` in one function and `SwapRemainingData` in another) — `data.curve.buy(...)` now correctly opens the curve implementation.

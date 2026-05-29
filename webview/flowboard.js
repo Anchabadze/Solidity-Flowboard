@@ -1999,6 +1999,290 @@ window.addEventListener(
   true
 );
 
+// Custom right-click menu --------------------------------------------------
+// State for the "Open flow" recursive expansion: childIds we expect to receive
+// from the host, and visited function keys to prevent loops and duplicates.
+const flowPending = new Set();
+const FLOW_MAX_CARDS = 300;
+
+/** True if `contract::name` is already in the ancestor chain of `cardId` -
+ *  i.e. expanding it would create a loop. Duplicates on OTHER branches are OK. */
+function isAncestorFunction(cardId, contract, name) {
+  let cur = cards.get(cardId);
+  while (cur) {
+    if ((cur.data.name || '') === name && (cur.data.contract || '') === contract) {
+      return true;
+    }
+    cur = cur.data.parentId ? cards.get(cur.data.parentId) : null;
+  }
+  return false;
+}
+// Tier layout: depth -> { x, nextY, maxRight, cards }. Reset per Open Flow.
+const flowColumns = new Map();
+const FLOW_COL_GAP = 160; // wider gap so the connecting arrows are visible
+const FLOW_ROW_GAP = 40;
+let flowSettleTimer = null;
+
+/** Center each depth-column vertically around the root card's middle. Runs
+ *  once expansion stops adding new cards (settling). Keeps the root in place. */
+function centerFlowColumns() {
+  const col0 = flowColumns.get(0);
+  if (!col0) {
+    return;
+  }
+  const rootCard = col0.cards.values().next().value;
+  if (!rootCard) {
+    return;
+  }
+  const rootCenter = rootCard.y + (rootCard.el.offsetHeight || 0) / 2;
+  flowColumns.forEach((col, depth) => {
+    if (depth === 0 || col.cards.size === 0) {
+      return;
+    }
+    let topY = Infinity;
+    let bottomY = -Infinity;
+    col.cards.forEach((c) => {
+      const h = c.el.offsetHeight || 0;
+      if (c.y < topY) topY = c.y;
+      if (c.y + h > bottomY) bottomY = c.y + h;
+    });
+    const colHeight = bottomY - topY;
+    const desiredTop = rootCenter - colHeight / 2;
+    const delta = desiredTop - topY;
+    if (Math.abs(delta) < 0.5) {
+      return;
+    }
+    col.cards.forEach((c) => {
+      c.y += delta;
+      c.el.style.top = c.y + 'px';
+    });
+    col.startY += delta;
+    col.nextY += delta;
+  });
+  redrawEdges();
+  schedulePersist();
+}
+
+function scheduleFlowCentering() {
+  if (flowSettleTimer) {
+    clearTimeout(flowSettleTimer);
+  }
+  flowSettleTimer = setTimeout(() => {
+    flowSettleTimer = null;
+    centerFlowColumns();
+  }, 150);
+}
+
+/** Place an Open-Flow card in its depth-column, stacked below earlier cards. */
+function placeFlowCardAtDepth(model, depth) {
+  let col = flowColumns.get(depth);
+  if (!col) {
+    let x;
+    let startY;
+    if (depth === 0) {
+      x = model.x;
+      startY = model.y;
+    } else {
+      const prev = flowColumns.get(depth - 1);
+      x = (prev ? prev.maxRight : model.x) + FLOW_COL_GAP;
+      // Vertical anchor: aim level columns at the same Y as column 0.
+      startY = (flowColumns.get(0) && flowColumns.get(0).startY) || model.y;
+    }
+    col = { x: x, nextY: startY, maxRight: x, startY: startY, cards: new Set() };
+    flowColumns.set(depth, col);
+  }
+  model.x = col.x;
+  model.y = col.nextY;
+  model.el.style.left = col.x + 'px';
+  model.el.style.top = col.nextY + 'px';
+  col.cards.add(model);
+  // Advance: card height + gap; widen column's right edge by this card's width.
+  const h = model.el.offsetHeight || 200;
+  const w = model.el.offsetWidth || 600;
+  col.nextY += h + FLOW_ROW_GAP;
+  const right = col.x + w;
+  if (right > col.maxRight) {
+    col.maxRight = right;
+  }
+}
+
+/** Recursively expand every clickable call in the given card. */
+function expandCardFlow(cardId) {
+  const model = cards.get(cardId);
+  if (!model || model.data.notFound || !model.codeEl) {
+    return;
+  }
+  const spans = model.codeEl.querySelectorAll('.call');
+  spans.forEach((span) => {
+    if (cards.size + flowPending.size >= FLOW_MAX_CARDS) {
+      return;
+    }
+    const name = span.dataset.call;
+    if (!name) {
+      return;
+    }
+    const fromContract = span.dataset.contract || (model.data.contract || '');
+    // Skip only when the target is already in the ancestor chain of this card
+    // (would create a loop). Duplicates elsewhere on the board are allowed.
+    if (isAncestorFunction(cardId, fromContract, name)) {
+      return;
+    }
+    const site = span.dataset.site != null ? Number(span.dataset.site) : undefined;
+    // Skip if this exact occurrence is already a child of this card.
+    if (findChildCard(cardId, site, name)) {
+      return;
+    }
+    const childId = genCardId();
+    flowPending.add(childId);
+    if (site != null) {
+      pendingChildSite.set(childId, site);
+    }
+    vscode.postMessage({
+      type: 'expand',
+      functionName: name,
+      fromId: cardId,
+      childId: childId,
+      fromContract: span.dataset.contract || null,
+      isSuper: span.dataset.super === '1',
+      argCount: span.dataset.arity != null ? Number(span.dataset.arity) : undefined
+    });
+  });
+}
+
+/** Open the entire call flow starting from the given card. */
+function openFlow(cardId) {
+  flowPending.clear();
+  flowColumns.clear();
+  const root = cards.get(cardId);
+  if (root) {
+    root.flowDepth = 0;
+    // Seed column 0 with the root so column 1 is placed to its right.
+    flowColumns.set(0, {
+      x: root.x,
+      nextY: root.y,
+      maxRight: root.x + (root.el.offsetWidth || 600),
+      startY: root.y,
+      cards: new Set([root])
+    });
+  }
+  expandCardFlow(cardId);
+}
+
+// The context menu element is built once and reused.
+const ctxMenu = document.createElement('div');
+ctxMenu.id = 'ctx-menu';
+ctxMenu.style.display = 'none';
+document.body.appendChild(ctxMenu);
+
+function hideContextMenu() {
+  ctxMenu.style.display = 'none';
+}
+
+function showContextMenu(x, y, items) {
+  ctxMenu.innerHTML = '';
+  items.forEach((it) => {
+    if (it.sep) {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-sep';
+      ctxMenu.appendChild(sep);
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'ctx-item' + (it.disabled ? ' disabled' : '');
+    el.textContent = it.label;
+    if (!it.disabled) {
+      el.addEventListener('mousedown', (e) => e.preventDefault());
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        hideContextMenu();
+        try { it.action(); } catch (_e) { /* swallow */ }
+      });
+    }
+    ctxMenu.appendChild(el);
+  });
+  // Position; clamp to viewport so the menu isn't clipped offscreen.
+  ctxMenu.style.left = '0px';
+  ctxMenu.style.top = '0px';
+  ctxMenu.style.display = 'block';
+  const r = ctxMenu.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let nx = x;
+  let ny = y;
+  if (nx + r.width > vw) nx = Math.max(0, vw - r.width - 4);
+  if (ny + r.height > vh) ny = Math.max(0, vh - r.height - 4);
+  ctxMenu.style.left = nx + 'px';
+  ctxMenu.style.top = ny + 'px';
+}
+
+window.addEventListener('contextmenu', (e) => {
+  const t = e.target;
+  // Let the native menu show for editable text (notes, inputs).
+  if (t && t.closest && t.closest('[contenteditable], input, select, textarea')) {
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  hideContextMenu();
+  const cardEl = t && t.closest ? t.closest('.card') : null;
+  const noteEl = t && t.closest ? t.closest('.note') : null;
+  // Remember pointer for paste positioning.
+  lastPointer = { x: e.clientX, y: e.clientY };
+
+  const items = [];
+  if (cardEl) {
+    const id = cardEl.dataset.id;
+    const m = cards.get(id);
+    if (m && !selected.has(m)) {
+      clearSelection();
+      selectModel(m);
+    }
+    items.push({ label: L.ctxCopy || 'Copy', action: () => copySelection() });
+    items.push({
+      label: L.ctxCut || 'Cut',
+      action: () => { copySelection(); deleteSelected(); }
+    });
+    // "Open flow" only for real (resolved) function cards.
+    if (m && !m.data.notFound) {
+      items.push({ sep: true });
+      items.push({ label: L.ctxOpenFlow || 'Open flow', action: () => openFlow(m.id) });
+    }
+  } else if (noteEl) {
+    const id = noteEl.dataset.id;
+    const m = notes.get(id);
+    if (m && !selected.has(m)) {
+      clearSelection();
+      selectModel(m);
+    }
+    items.push({ label: L.ctxCopy || 'Copy', action: () => copySelection() });
+    items.push({
+      label: L.ctxCut || 'Cut',
+      action: () => { copySelection(); deleteSelected(); }
+    });
+  } else {
+    items.push({
+      label: L.ctxPaste || 'Paste',
+      action: () => pasteClipboard(),
+      disabled: !clipboard
+    });
+  }
+  showContextMenu(e.clientX, e.clientY, items);
+}, true);
+
+// Hide the custom menu on left-click outside it (NOT on blur — right-clicking
+// can transiently blur the iframe on Windows and would close the menu instantly).
+document.addEventListener('mousedown', (e) => {
+  if (e.button === 2) {
+    return; // right-press: handled by the contextmenu listener above
+  }
+  if (!(e.target && e.target.closest && e.target.closest('#ctx-menu'))) {
+    hideContextMenu();
+  }
+}, true);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideContextMenu();
+});
+
 // Messages from the extension ----------------------------------------------
 window.addEventListener('message', (event) => {
   const data = event.data;
@@ -2007,6 +2291,21 @@ window.addEventListener('message', (event) => {
   }
   if (data.type === 'addCard') {
     addCard(data);
+    // If this card was opened as part of an "Open flow" expansion: position it
+    // in its depth-column (no overlap with siblings), then recurse.
+    if (data.id && flowPending.has(data.id)) {
+      flowPending.delete(data.id);
+      const model = cards.get(data.id);
+      const parent = data.parentId ? cards.get(data.parentId) : null;
+      if (model && parent) {
+        const depth = (parent.flowDepth != null ? parent.flowDepth : 0) + 1;
+        model.flowDepth = depth;
+        placeFlowCardAtDepth(model, depth);
+        redrawEdges();
+        scheduleFlowCentering();
+      }
+      expandCardFlow(data.id);
+    }
   } else if (data.type === 'restore') {
     restoreState(data.state);
   } else if (data.type === 'annotations') {

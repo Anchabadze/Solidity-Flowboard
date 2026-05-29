@@ -54,6 +54,11 @@ export interface WebviewStrings {
   subCode: string;
   note: string;
   searchEmpty: string;
+  // Context menu
+  ctxCopy: string;
+  ctxCut: string;
+  ctxPaste: string;
+  ctxOpenFlow: string;
 }
 
 /** Prompt fragments + builders for the AI calls (host-only, not serialized). */
@@ -144,7 +149,11 @@ const RU: Strings = {
     subName: 'имя',
     subCode: 'код',
     note: 'заметка',
-    searchEmpty: 'Ничего не найдено'
+    searchEmpty: 'Ничего не найдено',
+    ctxCopy: 'Копировать',
+    ctxCut: 'Вырезать',
+    ctxPaste: 'Вставить',
+    ctxOpenFlow: 'Открыть полностью'
   },
   prompt: {
     contextWhere(filePath, startLine, endLine) {
@@ -243,7 +252,11 @@ const EN: Strings = {
     subName: 'name',
     subCode: 'code',
     note: 'note',
-    searchEmpty: 'Nothing found'
+    searchEmpty: 'Nothing found',
+    ctxCopy: 'Copy',
+    ctxCut: 'Cut',
+    ctxPaste: 'Paste',
+    ctxOpenFlow: 'Open flow'
   },
   prompt: {
     contextWhere(filePath, startLine, endLine) {
