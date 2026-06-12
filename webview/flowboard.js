@@ -83,6 +83,7 @@ function applyTransform() {
   if (zoomLabel) {
     zoomLabel.textContent = Math.round(scale * 100) + '%';
   }
+  scheduleMinimapRedraw();
 }
 
 /** Convert a viewport (client) point into world coordinates. */
@@ -166,7 +167,8 @@ function snapshot() {
       bg: n.bg,
       bold: !!n.bold
     })),
-    camera: { scale: scale, panX: panX, panY: panY }
+    camera: { scale: scale, panX: panX, panY: panY },
+    ui: { minimapCollapsed: minimapCollapsed }
   };
 }
 
@@ -1621,6 +1623,7 @@ function redrawEdges() {
     path.setAttribute('marker-end', 'url(#arrow)');
     svg.appendChild(path);
   });
+  scheduleMinimapRedraw();
 }
 
 // Dragging (cards and notes, in world coordinates) -------------------------
@@ -1886,6 +1889,9 @@ function restoreState(state) {
       panX = state.camera.panX || 0;
       panY = state.camera.panY || 0;
     }
+    if (state.ui && typeof state.ui.minimapCollapsed === 'boolean') {
+      setMinimapCollapsed(state.ui.minimapCollapsed);
+    }
     applyTransform();
     redrawEdges();
     updateEmptyState();
@@ -1923,6 +1929,9 @@ function loadSnapshot(state) {
       scale = state.camera.scale || 1;
       panX = state.camera.panX || 0;
       panY = state.camera.panY || 0;
+    }
+    if (state.ui && typeof state.ui.minimapCollapsed === 'boolean') {
+      setMinimapCollapsed(state.ui.minimapCollapsed);
     }
   }
   applyTransform();
@@ -2639,6 +2648,197 @@ window.addEventListener('message', (event) => {
       }
       redrawEdges();
     }
+  }
+});
+
+// ===========================================================================
+// Minimap (corner overview of the entire board) -----------------------------
+// ===========================================================================
+const minimap = document.createElement('div');
+minimap.id = 'minimap';
+const minimapCanvas = document.createElement('canvas');
+minimapCanvas.id = 'minimap-canvas';
+const minimapToggle = document.createElement('button');
+minimapToggle.id = 'minimap-toggle';
+minimapToggle.type = 'button';
+minimapToggle.title = L.minimapTitle || 'Toggle minimap';
+minimapToggle.textContent = '–';
+minimap.appendChild(minimapCanvas);
+minimap.appendChild(minimapToggle);
+document.body.appendChild(minimap);
+
+const MINIMAP_W = 200;
+const MINIMAP_H = 140;
+const MINIMAP_PAD = 6;
+let minimapCollapsed = false;
+let minimapPending = false;
+let minimapDragging = false;
+
+function setMinimapCollapsed(v) {
+  minimapCollapsed = !!v;
+  minimap.classList.toggle('collapsed', minimapCollapsed);
+  minimapToggle.textContent = minimapCollapsed ? '🗺' : '–';
+  if (!minimapCollapsed) scheduleMinimapRedraw();
+}
+
+minimapToggle.addEventListener('mousedown', (e) => e.stopPropagation());
+minimapToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setMinimapCollapsed(!minimapCollapsed);
+  schedulePersist();
+});
+
+/** Bounding box of every card+note in world coordinates (or null if empty).
+ *  The current viewport is also folded in so it stays visible on the minimap
+ *  even when the user has panned far outside the content. */
+function worldBounds() {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let any = false;
+  const visit = (m) => {
+    const w = m.el.offsetWidth || 300;
+    const h = m.el.offsetHeight || 200;
+    if (m.x < minX) minX = m.x;
+    if (m.y < minY) minY = m.y;
+    if (m.x + w > maxX) maxX = m.x + w;
+    if (m.y + h > maxY) maxY = m.y + h;
+    any = true;
+  };
+  cards.forEach(visit);
+  notes.forEach(visit);
+  if (!any) return null;
+  const rect = flowboard.getBoundingClientRect();
+  const vx = -panX / scale;
+  const vy = -panY / scale;
+  const vw = rect.width / scale;
+  const vh = rect.height / scale;
+  if (vx < minX) minX = vx;
+  if (vy < minY) minY = vy;
+  if (vx + vw > maxX) maxX = vx + vw;
+  if (vy + vh > maxY) maxY = vy + vh;
+  return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+}
+
+function getMinimapTransform() {
+  const b = worldBounds();
+  if (!b) return null;
+  const W = MINIMAP_W - MINIMAP_PAD * 2;
+  const H = MINIMAP_H - MINIMAP_PAD * 2;
+  const dw = Math.max(1, b.maxX - b.minX);
+  const dh = Math.max(1, b.maxY - b.minY);
+  const s = Math.min(W / dw, H / dh);
+  const offX = MINIMAP_PAD + (W - dw * s) / 2;
+  const offY = MINIMAP_PAD + (H - dh * s) / 2;
+  return { s: s, offX: offX, offY: offY, bounds: b };
+}
+
+function scheduleMinimapRedraw() {
+  if (typeof minimap === 'undefined' || !minimap || minimapPending) return;
+  minimapPending = true;
+  requestAnimationFrame(() => {
+    minimapPending = false;
+    redrawMinimap();
+  });
+}
+
+function redrawMinimap() {
+  if (!minimap) return;
+  if (cards.size === 0 && notes.size === 0) {
+    minimap.classList.add('empty');
+    return;
+  }
+  minimap.classList.remove('empty');
+  if (minimapCollapsed) return;
+  const dpr = window.devicePixelRatio || 1;
+  const bw = Math.floor(MINIMAP_W * dpr);
+  const bh = Math.floor(MINIMAP_H * dpr);
+  if (minimapCanvas.width !== bw || minimapCanvas.height !== bh) {
+    minimapCanvas.width = bw;
+    minimapCanvas.height = bh;
+    minimapCanvas.style.width = MINIMAP_W + 'px';
+    minimapCanvas.style.height = MINIMAP_H + 'px';
+  }
+  const ctx = minimapCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, MINIMAP_W, MINIMAP_H);
+
+  const t = getMinimapTransform();
+  if (!t) return;
+  const s = t.s;
+  const bounds = t.bounds;
+  const tx = (wx) => t.offX + (wx - bounds.minX) * s;
+  const ty = (wy) => t.offY + (wy - bounds.minY) * s;
+
+  // Notes — soft yellow rectangles.
+  ctx.fillStyle = '#fde68a';
+  notes.forEach((n) => {
+    const w = (n.el.offsetWidth || 200) * s;
+    const h = (n.el.offsetHeight || 120) * s;
+    ctx.fillRect(tx(n.x), ty(n.y), Math.max(1, w), Math.max(1, h));
+  });
+
+  // Cards — colour by visibility, mirroring the on-board headers.
+  cards.forEach((c) => {
+    const w = (c.el.offsetWidth || 300) * s;
+    const h = (c.el.offsetHeight || 200) * s;
+    const hdr = c.el.querySelector('.card-header');
+    let fill = '#6b7280';
+    if (c.data.notFound) fill = '#3a3a3a';
+    else if (hdr && hdr.classList.contains('hdr-public')) fill = '#1dad13';
+    else if (hdr && hdr.classList.contains('hdr-internal')) fill = '#9ca3af';
+    ctx.fillStyle = fill;
+    ctx.fillRect(tx(c.x), ty(c.y), Math.max(2, w), Math.max(2, h));
+  });
+
+  // Viewport rectangle.
+  const rect = flowboard.getBoundingClientRect();
+  const vx = -panX / scale;
+  const vy = -panY / scale;
+  const vw = rect.width / scale;
+  const vh = rect.height / scale;
+  ctx.fillStyle = 'rgba(14, 99, 156, 0.18)';
+  ctx.fillRect(tx(vx), ty(vy), Math.max(2, vw * s), Math.max(2, vh * s));
+  ctx.strokeStyle = '#0e639c';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(tx(vx), ty(vy), Math.max(2, vw * s), Math.max(2, vh * s));
+}
+
+/** Translate a client-pixel point on the minimap to a world coordinate. */
+function minimapClientToWorld(clientX, clientY) {
+  const r = minimapCanvas.getBoundingClientRect();
+  const mx = Math.max(0, Math.min(MINIMAP_W, clientX - r.left));
+  const my = Math.max(0, Math.min(MINIMAP_H, clientY - r.top));
+  const t = getMinimapTransform();
+  if (!t) return null;
+  return {
+    x: t.bounds.minX + (mx - t.offX) / t.s,
+    y: t.bounds.minY + (my - t.offY) / t.s
+  };
+}
+
+function centerOnWorld(wx, wy) {
+  const rect = flowboard.getBoundingClientRect();
+  panX = rect.width / 2 - wx * scale;
+  panY = rect.height / 2 - wy * scale;
+  applyTransform();
+}
+
+minimapCanvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  minimapDragging = true;
+  const w = minimapClientToWorld(e.clientX, e.clientY);
+  if (w) centerOnWorld(w.x, w.y);
+});
+window.addEventListener('mousemove', (e) => {
+  if (!minimapDragging) return;
+  const w = minimapClientToWorld(e.clientX, e.clientY);
+  if (w) centerOnWorld(w.x, w.y);
+});
+window.addEventListener('mouseup', () => {
+  if (minimapDragging) {
+    minimapDragging = false;
+    schedulePersist();
   }
 });
 
