@@ -1,5 +1,10 @@
 # Change Log
 
+## 1.2.0
+
+- **Value trace (alt+click a parameter)**: hold Alt and click a parameter name in an external function (in the signature or in the body) to highlight that value across the card and propagate it down the call tree — every child card that receives it as a direct call argument lights up the matching parameter (even when it gets renamed, e.g. `amount` → `value`). Each traced parameter gets its own colour, and the colour stays consistent all the way down the flow. Library-style calls via `using X for Y` are detected so the implicit receiver doesn't throw the position off (e.g. `token.safeTransferFrom(a, b, amount)` correctly maps `amount` → `value`, not → `to`). Alt+click again on a highlighted parameter clears the trace. Multiple parameters can be traced simultaneously; Esc clears everything.
+- **Minimap**: small overview canvas (200×140) in the bottom-right corner showing every card and note plus the current viewport rectangle. Click anywhere on the minimap to center the canvas there, or drag the viewport rect to pan in real time. Cards are coloured by visibility (green public/external, gray internal/private). Collapses to a small floating icon; collapsed/expanded state persists per workspace.
+
 ## 1.1.0
 
 - **Right-click context menu** on cards / notes / empty canvas with **Copy / Cut / Paste** (the system menu's clipboard items never worked on cards — these do).
