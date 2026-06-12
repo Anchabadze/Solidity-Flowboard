@@ -20,7 +20,7 @@ const zoomLabel = document.getElementById('zoom-level');
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CARD_GAP_X = 60; // horizontal gap between a parent and its children
 const CARD_GAP_Y = 80; // vertical stagger between sibling children
-const MIN_SCALE = 0.15;
+const MIN_SCALE = 0.05;
 const MAX_SCALE = 3;
 const FONT_SIZES = [12, 14, 18, 24, 30, 36, 48, 60, 72, 80];
 const NOTE_MIN_W = 160;
@@ -469,8 +469,24 @@ function placeCard(data) {
   const parent = data.parentId ? cards.get(data.parentId) : undefined;
   if (parent) {
     const x = parent.x + parent.el.offsetWidth + CARD_GAP_X;
-    const y = parent.y + parent.childCount * CARD_GAP_Y;
-    parent.childCount += 1;
+    // Pick the FIRST vertical slot not currently occupied by an existing
+    // child. Without this, parent.childCount keeps incrementing on every
+    // open and never decrements on close, so re-opening the same call lands
+    // farther and farther below each cycle. Slot-based placement also makes
+    // a re-opened card return to its original spot, and a brand-new child
+    // fill the gap left by a removed sibling.
+    const occupied = new Set();
+    edges.forEach((e) => {
+      if (e.from !== parent.id) return;
+      const c = cards.get(e.to);
+      if (!c) return;
+      const slot = Math.round((c.y - parent.y) / CARD_GAP_Y);
+      if (slot >= 0) occupied.add(slot);
+    });
+    let slot = 0;
+    while (occupied.has(slot)) slot++;
+    const y = parent.y + slot * CARD_GAP_Y;
+    if (parent.childCount <= slot) parent.childCount = slot + 1;
     return { x, y };
   }
   // Root cards appear near the top-left of the CURRENT view (like notes), with a
@@ -728,6 +744,12 @@ function decorateParams(codeEl, paramNames) {
     let m;
     re.lastIndex = 0;
     while ((m = re.exec(text)) !== null) {
+      // Skip occurrences that are FIELD LABELS in named-args (`token: token`,
+      // `account: buyData.account`, etc.) - we want only the *value* side to
+      // be clickable / highlighted, not the label of the same name.
+      if (isNamedFieldLabel(text, m.index, m.index + m[0].length)) {
+        continue;
+      }
       if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
       const sp = document.createElement('span');
       const idx = indexOf.get(m[1]);
@@ -742,6 +764,25 @@ function decorateParams(codeEl, paramNames) {
     if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
     node.parentNode.replaceChild(frag, node);
   });
+}
+
+/** Heuristic: is the substring at [matchStart, matchEnd) inside `text` the
+ *  LABEL part of a named-args field (`fieldName: value`)? True when:
+ *   - the identifier is immediately preceded (after whitespace) by `{`, `,`,
+ *     or the start of the text node (multi-line struct literal), AND
+ *   - it is immediately followed (after whitespace) by a single `:`.
+ *  Ternary / conditional expressions can produce false positives only in
+ *  unusual line-break patterns; for typical Solidity code this is safe. */
+function isNamedFieldLabel(text, matchStart, matchEnd) {
+  let j = matchEnd;
+  while (j < text.length && /\s/.test(text[j])) j++;
+  if (j >= text.length || text[j] !== ':') return false;
+  if (text[j + 1] === ':') return false;
+  let i = matchStart - 1;
+  while (i >= 0 && /\s/.test(text[i])) i--;
+  if (i < 0) return true;
+  const c = text[i];
+  return c === '{' || c === ',';
 }
 
 /** Toggle the `.tracing` class on every `.trace-param` span according to the
@@ -881,6 +922,51 @@ function parseSignatureParams(clean) {
   });
 }
 
+/** Does the argument expression `expr` flow from the parameter `name`?
+ *  Treats `name`, `name.field`, `name.a.b`, `name[i]` as derived from the
+ *  same root value. Arithmetic / casts / function-call wrappings are NOT
+ *  treated as derivation - that path needs full data-flow analysis. */
+function argRootMatches(expr, name) {
+  if (!expr || !name) return false;
+  const m = /^([A-Za-z_$][\w$]*)\s*(?:\.|\[|$)/.exec(expr.trim());
+  return m != null && m[1] === name;
+}
+
+/** If `expr` is a Solidity named-args call literal `{field1: value1, ...}`,
+ *  parse it into an array of `{name, value}` pairs. Returns null otherwise.
+ *  Used for the named-call-args syntax: `foo({a: x, b: y})` is equivalent to
+ *  passing `x` as parameter `a` and `y` as parameter `b`, not positionally. */
+function parseNamedArgs(expr) {
+  if (!expr) return null;
+  const t = expr.trim();
+  if (t.length < 2 || t[0] !== '{' || t[t.length - 1] !== '}') return null;
+  const inner = t.slice(1, -1);
+  // Top-level comma split, respecting nested brackets and strings.
+  const parts = [];
+  let d = 0, s = false, sc = '', start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (s) { if (c === '\\') { i++; continue; } if (c === sc) s = false; continue; }
+    if (c === '"' || c === "'") { s = true; sc = c; continue; }
+    if (c === '(' || c === '[' || c === '{') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+    else if (c === ',' && d === 0) { parts.push(inner.slice(start, i).trim()); start = i + 1; }
+  }
+  const tail = inner.slice(start).trim();
+  if (tail) parts.push(tail);
+  const out = [];
+  for (const p of parts) {
+    if (!p) continue;
+    const colonIdx = p.indexOf(':');
+    if (colonIdx < 0) return null; // not a named field -> not a struct literal
+    const name = p.slice(0, colonIdx).trim();
+    const value = p.slice(colonIdx + 1).trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
+    out.push({ name: name, value: value });
+  }
+  return out.length > 0 ? out : null;
+}
+
 /** Recompute traced params for every descendant of `rootModel`. For each
  *  child, takes the parent's tracedParams, maps each name → arg position at
  *  the parentSite call, then to the child param at the same position. The
@@ -909,12 +995,36 @@ function recomputeTracesSubtree(rootModel) {
         // → `safeTransferFrom(IERC20 token, address from, address to, uint256 value)`
         // maps `amount` → `value`, not `amount` → `to`.
         const shift = site.kind === 'member' && childParams.length === args.length + 1 ? 1 : 0;
+        // Pre-parse each arg once: a single named-args struct literal
+        // (`foo({a: x, b: y})`) is split per field name so each field can map
+        // independently to the child param of the same NAME, not by position.
+        const namedPerArg = args.map((a) => parseNamedArgs(a));
         (model.data.tracedParams || []).forEach((tp) => {
+          // A parent param can appear in MULTIPLE arg positions of the same
+          // call (e.g. `_assertValidRecipient(buyData.recipient, buyData.token)`
+          // where both args share the same root `buyData`). Each match maps to
+          // its own destination child param, so don't stop at the first hit.
           for (let i = 0; i < args.length; i++) {
-            if (args[i] === tp.name) {
+            // Positional match: arg expression's root identifier === tp.name.
+            if (argRootMatches(args[i], tp.name)) {
               const cn = childParams[i + shift];
-              if (cn) next.push({ name: cn, color: tp.color });
-              break;
+              if (cn && !next.some((t) => t.name === cn)) {
+                next.push({ name: cn, color: tp.color });
+              }
+            }
+            // Named-args match: for `foo({account: buyData.account, ...})`,
+            // the field `account`'s value derives from `buyData`, so
+            // propagate the trace to the child param literally named `account`.
+            const named = namedPerArg[i];
+            if (named) {
+              named.forEach((field) => {
+                if (argRootMatches(field.value, tp.name)) {
+                  if (childParams.indexOf(field.name) >= 0 &&
+                      !next.some((t) => t.name === field.name)) {
+                    next.push({ name: field.name, color: tp.color });
+                  }
+                }
+              });
             }
           }
         });
@@ -1231,10 +1341,75 @@ function addCard(data, opts) {
   }
 
   makeDraggable(header, model);
+  // Re-layout step: the slot calculation in `placeCard` is per-parent only and
+  // uses a fixed `CARD_GAP_Y` which is smaller than the rendered card height,
+  // so vanilla slot placement still overlaps with siblings whose body is tall,
+  // and never considers cards from other branches. Now that the DOM is laid
+  // out and we know the real width/height, slide the card down until it sits
+  // in empty space. Skipped for restoring + Open-Flow paths (the latter will
+  // be re-positioned by preplaceFlowSubtree right after this anyway).
+  if (!restoring && !flowPending.has(id)) {
+    avoidOverlap(model);
+  }
   redrawEdges();
 
   if (!restoring) {
     schedulePersist();
+  }
+}
+
+/** Height of the .card-modifiers row that sits absolutely-positioned ABOVE
+ *  the card (bottom: calc(100% + 6px)). Not included in offsetHeight, so
+ *  collision checks must add it back to get the card's true visual top. */
+function modOverhead(model) {
+  if (!model || !model.el || !model.el.querySelector) return 0;
+  const mods = model.el.querySelector('.card-modifiers');
+  if (!mods) return 0;
+  return (mods.offsetHeight || 0) + 6;
+}
+
+/** Slide `model` straight down until its bounding box no longer overlaps any
+ *  other card or note. Each iteration moves past the lowest conflicting card,
+ *  so convergence is at most O(boardSize). The MARGIN below is in world units;
+ *  at the 79% default zoom one screen grid square is 24px, which corresponds
+ *  to 24/0.79 ≈ 30 world units - so 30 gives roughly one grid square of
+ *  breathing room between any two cards on the board. */
+function avoidOverlap(model) {
+  const MARGIN = 30;
+  const w = model.el.offsetWidth || 600;
+  const h = model.el.offsetHeight || 300;
+  const modelTopExt = modOverhead(model);
+  const maxIters = cards.size + notes.size + 5;
+  for (let iter = 0; iter < maxIters; iter++) {
+    let lowestBottom = -Infinity;
+    let hit = false;
+    const consider = (target, tw, th, topExt) => {
+      if (target === model) return;
+      // Effective top of each card is raised by its modifier-chip overhead
+      // so chips don't visually crash into the card above. Bottom is the
+      // normal box bottom (no chips beneath the card).
+      const tTop = target.y - topExt;
+      const tBot = target.y + th;
+      const mTop = model.y - modelTopExt;
+      const mBot = model.y + h;
+      if (
+        model.x + w + MARGIN > target.x &&
+        model.x < target.x + tw + MARGIN &&
+        mBot + MARGIN > tTop &&
+        mTop < tBot + MARGIN
+      ) {
+        hit = true;
+        // After the move, model's logical top (model.y - modelTopExt) must sit
+        // MARGIN below target's logical bottom, so y = tBot + MARGIN + topExt.
+        const b = tBot + MARGIN + modelTopExt;
+        if (b > lowestBottom) lowestBottom = b;
+      }
+    };
+    cards.forEach((c) => consider(c, c.el.offsetWidth || w, c.el.offsetHeight || h, modOverhead(c)));
+    notes.forEach((n) => consider(n, n.el.offsetWidth || 200, n.el.offsetHeight || 120, 0));
+    if (!hit) break;
+    model.y = lowestBottom;
+    model.el.style.top = model.y + 'px';
   }
 }
 
@@ -2331,6 +2506,13 @@ const flowColumns = new Map();
 const FLOW_COL_GAP = 160; // wider gap so the connecting arrows are visible
 const FLOW_ROW_GAP = 40;
 let flowSettleTimer = null;
+// Root card whose Open-Flow session is in progress (drives where the message
+// handler re-runs the DFS preplace). Cleared when no more cards are pending.
+let currentFlowRootId = null;
+// True only when the Open-Flow session started with zero existing descendants.
+// Vertical centering of deeper columns runs only in this case; partial reopens
+// keep existing cards' slots stable.
+let flowFreshSession = false;
 
 /** Center each depth-column vertically around the root card's middle. Runs
  *  once expansion stops adding new cards (settling). Keeps the root in place. */
@@ -2373,6 +2555,10 @@ function centerFlowColumns() {
 }
 
 function scheduleFlowCentering() {
+  // Centering pulls deeper columns up/down to align with the root's middle.
+  // Only runs while an Open-Flow session is active - normal card add/remove
+  // shouldn't shift unrelated columns.
+  if (!flowFreshSession) return;
   if (flowSettleTimer) {
     clearTimeout(flowSettleTimer);
   }
@@ -2458,23 +2644,116 @@ function expandCardFlow(cardId) {
   });
 }
 
-/** Open the entire call flow starting from the given card. */
-function openFlow(cardId) {
-  flowPending.clear();
+/** Walk every clickable call in every card of the subtree rooted at `cardId`
+ *  and check whether each one already has a corresponding child card. The
+ *  subtree is fully open only when no call site is missing its child. Loops
+ *  (ancestor reuse) and unresolved (notFound) targets are treated as expanded. */
+function isFlowFullyOpen(cardId) {
+  const visited = new Set();
+  function check(id) {
+    if (visited.has(id)) return true;
+    visited.add(id);
+    const m = cards.get(id);
+    if (!m || m.data.notFound || !m.codeEl) return true;
+    const spans = m.codeEl.querySelectorAll('.call');
+    for (const span of spans) {
+      const name = span.dataset.call;
+      if (!name) continue;
+      const fromContract = span.dataset.contract || (m.data.contract || '');
+      if (isAncestorFunction(id, fromContract, name)) continue;
+      const site = span.dataset.site != null ? Number(span.dataset.site) : undefined;
+      const child = findChildCard(id, site, name);
+      if (!child) return false;
+      if (!check(child.id)) return false;
+    }
+    return true;
+  }
+  return check(cardId);
+}
+
+/** Remove every descendant card of `cardId` (the card itself stays). */
+function closeFlow(cardId) {
+  const directChildIds = edges.filter((e) => e.from === cardId).map((e) => e.to);
+  directChildIds.forEach((cid) => removeSubtree(cid));
   flowColumns.clear();
-  const root = cards.get(cardId);
-  if (root) {
-    root.flowDepth = 0;
-    // Seed column 0 with the root so column 1 is placed to its right.
-    flowColumns.set(0, {
-      x: root.x,
-      nextY: root.y,
-      maxRight: root.x + (root.el.offsetWidth || 600),
-      startY: root.y,
-      cards: new Set([root])
+  flowPending.clear();
+  currentFlowRootId = null;
+  schedulePersist();
+}
+
+/** Lay every existing descendant of `rootId` into its tier-column slot, walking
+ *  the call graph DFS in call-order (by parentSite). Idempotent: each invocation
+ *  resets the column map and re-places every existing card from scratch, so a
+ *  new arrival can be inserted into its DFS position simply by re-running this. */
+function preplaceFlowSubtree(rootId) {
+  flowColumns.clear();
+  const root = cards.get(rootId);
+  if (!root) return;
+  root.flowDepth = 0;
+  flowColumns.set(0, {
+    x: root.x,
+    nextY: root.y,
+    maxRight: root.x + (root.el.offsetWidth || 600),
+    startY: root.y,
+    cards: new Set([root])
+  });
+  const visited = new Set([rootId]);
+  function dfs(id, depth) {
+    const childEdges = edges.filter((e) => e.from === id);
+    childEdges.sort((a, b) => {
+      const ca = cards.get(a.to);
+      const cb = cards.get(b.to);
+      const sa = ca && ca.parentSite != null ? ca.parentSite : Infinity;
+      const sb = cb && cb.parentSite != null ? cb.parentSite : Infinity;
+      return sa - sb;
+    });
+    childEdges.forEach((e) => {
+      if (visited.has(e.to)) return;
+      visited.add(e.to);
+      const c = cards.get(e.to);
+      if (!c) return;
+      c.flowDepth = depth + 1;
+      placeFlowCardAtDepth(c, depth + 1);
+      dfs(e.to, depth + 1);
     });
   }
-  expandCardFlow(cardId);
+  dfs(rootId, 0);
+}
+
+/** Walk every existing card under `cardId` (DFS) and call expandCardFlow on
+ *  each one - this sends expand-messages for every CURRENTLY MISSING call.
+ *  New cards arrive via the addCard message handler, which re-runs the
+ *  preplace + recurses into the new card itself. */
+function expandCardFlowRecursive(cardId) {
+  const visited = new Set();
+  function walk(id) {
+    if (visited.has(id)) return;
+    visited.add(id);
+    expandCardFlow(id);
+    edges.filter((e) => e.from === id).forEach((e) => walk(e.to));
+  }
+  walk(cardId);
+}
+
+/** Open the entire call flow starting from the given card. */
+function openFlow(cardId) {
+  const root = cards.get(cardId);
+  if (!root) return;
+  currentFlowRootId = cardId;
+  // Every Open-Flow click acts like a fresh layout: existing manual cards get
+  // snapped to their tier positions and deeper columns are vertically centred
+  // around the root, so a partial reopen looks the same as a fresh expansion.
+  flowFreshSession = true;
+  flowPending.clear();
+  preplaceFlowSubtree(cardId);
+  redrawEdges();
+  expandCardFlowRecursive(cardId);
+  if (flowPending.size === 0) {
+    // Nothing new to fetch but we still want columns centred (existing cards
+    // may have been moved during preplace).
+    scheduleFlowCentering();
+    currentFlowRootId = null;
+  }
 }
 
 // The context menu element is built once and reused.
@@ -2551,10 +2830,19 @@ window.addEventListener('contextmenu', (e) => {
       label: L.ctxCut || 'Cut',
       action: () => { copySelection(); deleteSelected(); }
     });
-    // "Open flow" only for real (resolved) function cards.
+    // "Open flow" / "Close flow" only for real (resolved) function cards.
+    // - Close flow: every descendant call site has its child AND the card has
+    //   at least one child to close.
+    // - Open flow: otherwise (still missing calls, or no children yet).
     if (m && !m.data.notFound) {
+      const hasChildren = edges.some((e) => e.from === m.id);
+      const fullyOpen = hasChildren && isFlowFullyOpen(m.id);
       items.push({ sep: true });
-      items.push({ label: L.ctxOpenFlow || 'Open flow', action: () => openFlow(m.id) });
+      if (fullyOpen) {
+        items.push({ label: L.ctxCloseFlow || 'Close flow', action: () => closeFlow(m.id) });
+      } else {
+        items.push({ label: L.ctxOpenFlow || 'Open flow', action: () => openFlow(m.id) });
+      }
     }
   } else if (noteEl) {
     const id = noteEl.dataset.id;
@@ -2608,20 +2896,24 @@ window.addEventListener('message', (event) => {
   }
   if (data.type === 'addCard') {
     addCard(data);
-    // If this card was opened as part of an "Open flow" expansion: position it
-    // in its depth-column (no overlap with siblings), then recurse.
+    // If this card was opened as part of an "Open flow" expansion, slot every
+    // existing descendant (including this brand-new card) back into its tier
+    // position by replaying the DFS preplace from the session root. This is
+    // what makes a newly-arrived card land at its proper call-order index in
+    // its depth column instead of being appended at the bottom.
     if (data.id && flowPending.has(data.id)) {
       flowPending.delete(data.id);
-      const model = cards.get(data.id);
-      const parent = data.parentId ? cards.get(data.parentId) : null;
-      if (model && parent) {
-        const depth = (parent.flowDepth != null ? parent.flowDepth : 0) + 1;
-        model.flowDepth = depth;
-        placeFlowCardAtDepth(model, depth);
+      if (currentFlowRootId && cards.has(currentFlowRootId)) {
+        preplaceFlowSubtree(currentFlowRootId);
         redrawEdges();
         scheduleFlowCentering();
       }
       expandCardFlow(data.id);
+      if (flowPending.size === 0) {
+        // Session settled - drop the root reference so an unrelated paste/etc.
+        // doesn't accidentally inherit it.
+        currentFlowRootId = null;
+      }
     }
   } else if (data.type === 'restore') {
     restoreState(data.state);
@@ -2670,7 +2962,8 @@ document.body.appendChild(minimap);
 const MINIMAP_W = 200;
 const MINIMAP_H = 140;
 const MINIMAP_PAD = 6;
-let minimapCollapsed = false;
+// Default to collapsed; restoreState will expand if the user previously did so.
+let minimapCollapsed = true;
 let minimapPending = false;
 let minimapDragging = false;
 
@@ -2680,6 +2973,10 @@ function setMinimapCollapsed(v) {
   minimapToggle.textContent = minimapCollapsed ? '🗺' : '–';
   if (!minimapCollapsed) scheduleMinimapRedraw();
 }
+// Apply the default state to the DOM immediately so the first render is
+// consistent before any restoreState callback fires.
+minimap.classList.add('collapsed');
+minimapToggle.textContent = '🗺';
 
 minimapToggle.addEventListener('mousedown', (e) => e.stopPropagation());
 minimapToggle.addEventListener('click', (e) => {

@@ -59,6 +59,7 @@ export interface WebviewStrings {
   ctxCut: string;
   ctxPaste: string;
   ctxOpenFlow: string;
+  ctxCloseFlow: string;
 }
 
 /** Prompt fragments + builders for the AI calls (host-only, not serialized). */
@@ -153,7 +154,8 @@ const RU: Strings = {
     ctxCopy: 'Копировать',
     ctxCut: 'Вырезать',
     ctxPaste: 'Вставить',
-    ctxOpenFlow: 'Открыть полностью'
+    ctxOpenFlow: 'Открыть полностью',
+    ctxCloseFlow: 'Закрыть полностью'
   },
   prompt: {
     contextWhere(filePath, startLine, endLine) {
@@ -256,7 +258,8 @@ const EN: Strings = {
     ctxCopy: 'Copy',
     ctxCut: 'Cut',
     ctxPaste: 'Paste',
-    ctxOpenFlow: 'Open flow'
+    ctxOpenFlow: 'Open flow',
+    ctxCloseFlow: 'Close flow'
   },
   prompt: {
     contextWhere(filePath, startLine, endLine) {
