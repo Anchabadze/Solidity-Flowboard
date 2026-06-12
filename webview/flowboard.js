@@ -675,6 +675,286 @@ function detectBadges(model) {
   return badges;
 }
 
+// ---------------------------------------------------------------------------
+// Value-trace: alt-click a *parameter name* in an external function to
+// highlight it across the card body and propagate to every child card it
+// flows into as a direct call argument. Each traced parameter gets its own
+// color, and multiple parameters can be traced at once (toggle on/off).
+// ---------------------------------------------------------------------------
+
+const NON_CALL_TRACE = new Set([
+  'if','for','while','switch','catch','return','returns','function','require',
+  'assert','revert','emit','new','delete','using','type','keccak256','sha256',
+  'ripemd160','ecrecover','addmod','mulmod','blockhash','uint','uint8','uint16',
+  'uint32','uint64','uint128','uint256','int','int8','int16','int32','int64',
+  'int128','int256','bytes','bytes1','bytes4','bytes8','bytes16','bytes32',
+  'address','bool','string','payable','modifier','constructor','mapping'
+]);
+
+const TRACE_COLOR_COUNT = 6;
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Wrap every standalone occurrence of each parameter name inside `codeEl`
+ *  with a .trace-param span tagged with the parameter name and color index.
+ *  Text nodes inside .call (function-name spans) are skipped so that call-
+ *  click detection and styling are not disturbed. */
+function decorateParams(codeEl, paramNames) {
+  if (!paramNames || paramNames.length === 0) return;
+  const indexOf = new Map();
+  paramNames.forEach((n, i) => { if (n && !indexOf.has(n)) indexOf.set(n, i); });
+  const unique = [...indexOf.keys()];
+  if (unique.length === 0) return;
+  unique.sort((a, b) => b.length - a.length);
+  const re = new RegExp('\\b(' + unique.map(escapeRegExp).join('|') + ')\\b', 'g');
+  const walker = document.createTreeWalker(codeEl, NodeFilter.SHOW_TEXT, null);
+  const nodes = [];
+  let n;
+  while ((n = walker.nextNode())) {
+    const p = n.parentNode;
+    if (!p) continue;
+    if (p.closest && (p.closest('.call') || p.closest('.trace-param'))) continue;
+    re.lastIndex = 0;
+    if (re.test(n.nodeValue)) nodes.push(n);
+  }
+  nodes.forEach((node) => {
+    const text = node.nodeValue;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const sp = document.createElement('span');
+      const idx = indexOf.get(m[1]);
+      const color = (idx != null ? idx : 0) % TRACE_COLOR_COUNT;
+      sp.className = 'trace-param trace-c-' + color;
+      sp.dataset.param = m[1];
+      sp.dataset.color = String(color);
+      sp.textContent = m[0];
+      frag.appendChild(sp);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  });
+}
+
+/** Toggle the `.tracing` class on every `.trace-param` span according to the
+ *  currently active traced params for this card, and re-stamp its `trace-c-N`
+ *  colour class so an active param wears the *inherited* trace colour (the
+ *  colour of the original param being followed) rather than its own per-card
+ *  signature slot. Inactive spans fall back to their own slot colour. */
+function applyTraceActive(codeEl, tracedParams) {
+  if (!codeEl) return;
+  const colorByName = new Map((tracedParams || []).map((t) => [t.name, t.color]));
+  codeEl.querySelectorAll('.trace-param').forEach((sp) => {
+    let color;
+    if (colorByName.has(sp.dataset.param)) {
+      sp.classList.add('tracing');
+      color = colorByName.get(sp.dataset.param);
+    } else {
+      sp.classList.remove('tracing');
+      color = Number(sp.dataset.color) || 0;
+    }
+    for (let i = 0; i < TRACE_COLOR_COUNT; i++) {
+      sp.classList.remove('trace-c-' + i);
+    }
+    sp.classList.add('trace-c-' + color);
+  });
+}
+
+/** Parse model.clean to find every CLICKABLE call site in document order,
+ *  matching the rules of highlightSolidity. Used to map a child's parentSite
+ *  to that call's argument list. */
+function findClickableCallSites(model) {
+  const code = model.clean || '';
+  const internalSet = model.internalSet;
+  const memberMap = model.memberMap;
+  const newCallSet = model.newCallSet;
+  const out = [];
+  const re = /([A-Za-z_$][\w$]*)\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const name = m[1];
+    if (NON_CALL_TRACE.has(name)) continue;
+    let i = m.index - 1;
+    while (i >= 0 && /\s/.test(code[i])) i--;
+    let isCall = false;
+    let kind = 'internal';
+    if (i >= 0 && code[i] === '.') {
+      kind = 'member';
+      let j = i - 1;
+      while (j >= 0 && /\s/.test(code[j])) j--;
+      let recv = '';
+      if (j >= 0 && code[j] === ')') {
+        let depth = 0;
+        let open = -1;
+        for (let k = j; k >= 0; k--) {
+          if (code[k] === ')') depth++;
+          else if (code[k] === '(') { depth--; if (depth === 0) { open = k; break; } }
+        }
+        if (open >= 0) {
+          let p = open - 1;
+          while (p >= 0 && /\s/.test(code[p])) p--;
+          const end = p + 1;
+          while (p >= 0 && /[\w$]/.test(code[p])) p--;
+          recv = code.slice(p + 1, end);
+        }
+      } else {
+        const end = j + 1;
+        while (j >= 0 && /[\w$]/.test(code[j])) j--;
+        recv = code.slice(j + 1, end);
+      }
+      if (recv && memberMap && memberMap.has(recv + ' ' + name)) isCall = true;
+    } else {
+      let k = i;
+      const we = k + 1;
+      while (k >= 0 && /[\w$]/.test(code[k])) k--;
+      const prev = code.slice(k + 1, we);
+      if (prev === 'new') {
+        if (newCallSet && newCallSet.has(name)) { isCall = true; kind = 'new'; }
+      } else if (internalSet && internalSet.has(name)) {
+        isCall = true;
+      }
+    }
+    if (!isCall) continue;
+    const openIdx = m.index + m[0].length - 1;
+    let depth = 0, inStr = false, strCh = '', closeIdx = -1;
+    for (let j = openIdx; j < code.length; j++) {
+      const c = code[j];
+      if (inStr) { if (c === '\\') { j++; continue; } if (c === strCh) inStr = false; continue; }
+      if (c === '"' || c === "'") { inStr = true; strCh = c; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) { closeIdx = j; break; } }
+    }
+    if (closeIdx < 0) continue;
+    // Split args at top-level commas.
+    const args = [];
+    let d2 = 0, s2 = false, sc2 = '', start = openIdx + 1;
+    for (let j = openIdx + 1; j < closeIdx; j++) {
+      const c = code[j];
+      if (s2) { if (c === '\\') { j++; continue; } if (c === sc2) s2 = false; continue; }
+      if (c === '"' || c === "'") { s2 = true; sc2 = c; continue; }
+      if (c === '(' || c === '[' || c === '{') d2++;
+      else if (c === ')' || c === ']' || c === '}') d2--;
+      else if (c === ',' && d2 === 0) { args.push(code.slice(start, j).trim()); start = j + 1; }
+    }
+    const tail = code.slice(start, closeIdx).trim();
+    if (tail || args.length) args.push(tail);
+    out.push({ name: name, args: args, site: out.length, kind: kind });
+  }
+  return out;
+}
+
+/** Parse the function signature in `clean` and return parameter names (in order). */
+function parseSignatureParams(clean) {
+  if (!clean) return [];
+  let m = /\bfunction\s+[A-Za-z_$][\w$]*\s*\(/.exec(clean);
+  if (!m) m = /\bconstructor\s*\(/.exec(clean);
+  if (!m) return [];
+  const openIdx = m.index + m[0].length - 1;
+  let depth = 0, close = -1;
+  for (let i = openIdx; i < clean.length; i++) {
+    if (clean[i] === '(') depth++;
+    else if (clean[i] === ')') { depth--; if (depth === 0) { close = i; break; } }
+  }
+  if (close < 0) return [];
+  const text = clean.slice(openIdx + 1, close);
+  const parts = [];
+  let d = 0, start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(' || c === '[') d++;
+    else if (c === ')' || c === ']') d--;
+    else if (c === ',' && d === 0) { parts.push(text.slice(start, i).trim()); start = i + 1; }
+  }
+  const last = text.slice(start).trim();
+  if (last || parts.length) parts.push(last);
+  return parts.map((p) => {
+    const idm = /([A-Za-z_$][\w$]*)\s*$/.exec(p);
+    return idm ? idm[1] : '';
+  });
+}
+
+/** Recompute traced params for every descendant of `rootModel`. For each
+ *  child, takes the parent's tracedParams, maps each name → arg position at
+ *  the parentSite call, then to the child param at the same position. The
+ *  color is inherited from the parent's traced param so a value keeps its
+ *  color all the way down the chain. */
+function recomputeTracesSubtree(rootModel) {
+  const visited = new Set();
+  function dfs(model) {
+    if (visited.has(model.id)) return;
+    visited.add(model.id);
+    const sites = findClickableCallSites(model);
+    edges.forEach((e) => {
+      if (e.from !== model.id) return;
+      const child = cards.get(e.to);
+      if (!child || child.data.notFound) return;
+      const ps = child.data.parentSite;
+      const next = [];
+      if (ps != null && ps >= 0 && ps < sites.length) {
+        const site = sites[ps];
+        const args = site.args;
+        const childParams = child.paramNames || parseSignatureParams(child.clean);
+        // `using X for Y` library calls inject the receiver as the first
+        // argument of the resolved library function, so the call site has one
+        // fewer arg than the destination signature. Shift positions by 1 in
+        // that case so e.g. `token.safeTransferFrom(a, b, amount)` (3 args)
+        // → `safeTransferFrom(IERC20 token, address from, address to, uint256 value)`
+        // maps `amount` → `value`, not `amount` → `to`.
+        const shift = site.kind === 'member' && childParams.length === args.length + 1 ? 1 : 0;
+        (model.data.tracedParams || []).forEach((tp) => {
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === tp.name) {
+              const cn = childParams[i + shift];
+              if (cn) next.push({ name: cn, color: tp.color });
+              break;
+            }
+          }
+        });
+      }
+      const oldKey = JSON.stringify(child.data.tracedParams || []);
+      const newKey = JSON.stringify(next);
+      if (oldKey !== newKey) {
+        child.data.tracedParams = next;
+        applyTraceActive(child.codeEl, next);
+      }
+      dfs(child);
+    });
+  }
+  dfs(rootModel);
+}
+
+/** Clear the trace from every card on the board. */
+function clearAllTraces() {
+  let any = false;
+  cards.forEach((c) => {
+    if (c.data.tracedParams && c.data.tracedParams.length) {
+      c.data.tracedParams = [];
+      applyTraceActive(c.codeEl, []);
+      any = true;
+    }
+  });
+  if (any) schedulePersist();
+}
+
+/** Toggle parameter `paramName` in `model`'s traced set, then recompute the
+ *  subtree so descendants pick up (or drop) the trace. */
+function toggleTrace(model, paramName, color) {
+  const list = (model.data.tracedParams || []).slice();
+  const i = list.findIndex((t) => t.name === paramName);
+  if (i >= 0) list.splice(i, 1);
+  else list.push({ name: paramName, color: color });
+  model.data.tracedParams = list;
+  applyTraceActive(model.codeEl, list);
+  recomputeTracesSubtree(model);
+  schedulePersist();
+}
+
 function renderCodeBody(model) {
   const codeEl = model.codeEl;
 
@@ -710,6 +990,23 @@ function renderCodeBody(model) {
     }
   });
   codeEl.innerHTML = html;
+  // Wrap every parameter-name occurrence so alt+click can target it.
+  decorateParams(codeEl, model.paramNames);
+  // Apply the active state for currently traced params.
+  applyTraceActive(codeEl, model.data.tracedParams);
+
+  // Alt+click on a parameter name toggles its trace (and propagates to children).
+  codeEl.querySelectorAll('.trace-param').forEach((sp) => {
+    sp.addEventListener('click', (e) => {
+      if (!e.altKey) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const name = sp.dataset.param;
+      const color = Number(sp.dataset.color) || 0;
+      if (!name) return;
+      toggleTrace(model, name, color);
+    });
+  });
 
   codeEl.querySelectorAll('.call').forEach((el) => {
     el.addEventListener('click', (e) => {
@@ -881,9 +1178,12 @@ function addCard(data, opts) {
       notFound: !!data.notFound,
       summary: data.summary || null,
       annotations: data.annotations || null,
-      showAnnotations: !!data.showAnnotations
+      showAnnotations: !!data.showAnnotations,
+      tracedParams: Array.isArray(data.tracedParams) ? data.tracedParams : []
     }
   };
+  // Cache parameter names from the function signature for the trace feature.
+  model.paramNames = data.notFound ? [] : parseSignatureParams(model.clean);
   cards.set(id, model);
   updateEmptyState(); // re-hide the placeholder now that a card exists
 
@@ -2280,7 +2580,15 @@ document.addEventListener('mousedown', (e) => {
   }
 }, true);
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') hideContextMenu();
+  if (e.key === 'Escape') {
+    hideContextMenu();
+    // Also clear any active value-trace highlight.
+    let anyTrace = false;
+    cards.forEach((c) => {
+      if (c.data.tracedParams && c.data.tracedParams.length) anyTrace = true;
+    });
+    if (anyTrace) clearAllTraces();
+  }
 });
 
 // Messages from the extension ----------------------------------------------

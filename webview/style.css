@@ -701,3 +701,23 @@ body {
   background: #3e3e42;
   margin: 4px 0;
 }
+
+/* Trace highlight: alt+click a parameter name to mark its path through the
+ * flow. The .trace-param span wraps every occurrence of any parameter name
+ * so it can be clicked; the .tracing class makes it visually active, and the
+ * per-parameter colour comes from .trace-c-N (one class per signature slot). */
+.trace-param {
+  border-radius: 3px;
+  cursor: alias;
+}
+.trace-param.tracing {
+  color: #1f2937;
+  font-weight: 700;
+  padding: 0 2px;
+}
+.trace-param.tracing.trace-c-0 { background: #fff5b1; }
+.trace-param.tracing.trace-c-1 { background: #bee3f8; }
+.trace-param.tracing.trace-c-2 { background: #c6f6d5; }
+.trace-param.tracing.trace-c-3 { background: #fbcfe8; }
+.trace-param.tracing.trace-c-4 { background: #fed7aa; }
+.trace-param.tracing.trace-c-5 { background: #ddd6fe; }
